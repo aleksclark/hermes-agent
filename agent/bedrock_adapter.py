@@ -558,15 +558,19 @@ def build_bedrock_kwargs(
     if bedrock_tools:
         kwargs["toolConfig"] = {"tools": bedrock_tools}
 
-    # Add reasoning/thinking config if provided
+    # Add reasoning/thinking config if provided and explicitly requested.
+    # Only enable Bedrock extended thinking when budget_tokens is explicitly set.
+    # OpenRouter-style reasoning configs ({"enabled": True, "effort": "medium"})
+    # are NOT translated to Bedrock thinking — they control a different mechanism.
     if reasoning_config and isinstance(reasoning_config, dict):
-        budget_tokens = reasoning_config.get("budget_tokens", 4096)
-        kwargs["additionalModelRequestFields"] = {
-            "thinking": {
-                "type": "enabled",
-                "budgetTokens": budget_tokens,
+        budget_tokens = reasoning_config.get("budget_tokens")
+        if budget_tokens and isinstance(budget_tokens, int) and budget_tokens > 0:
+            kwargs["additionalModelRequestFields"] = {
+                "thinking": {
+                    "type": "enabled",
+                    "budgetTokens": budget_tokens,
+                }
             }
-        }
 
     return kwargs
 
