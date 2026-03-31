@@ -192,6 +192,16 @@ def _has_any_provider_configured() -> bool:
         _model_name = ""
     _has_hermes_config = _model_name and _model_name != _DEFAULT_MODEL
 
+    # Bedrock with IAM role auth: if the user has explicitly configured
+    # provider=bedrock in config, credentials come from the instance metadata
+    # service (no env vars needed). Trust the config.
+    if _has_hermes_config:
+        _provider = ""
+        if isinstance(model_cfg, dict):
+            _provider = (model_cfg.get("provider") or "").strip().lower()
+        if _provider in ("bedrock", "aws-bedrock", "aws"):
+            return True
+
     # Check env vars (may be set by .env or shell).
     # OPENAI_BASE_URL alone counts — local models (vLLM, llama.cpp, etc.)
     # often don't require an API key.
