@@ -1222,6 +1222,11 @@ def bedrock_converse_stream(
                         block_delta = payload.get("contentBlockDelta", payload)
                         delta = block_delta.get("delta", {})
 
+                        # Auto-initialize current_block if no contentBlockStart was received
+                        if current_block is None:
+                            current_block = {}
+                            current_block_index = block_delta.get("contentBlockIndex", len(content_blocks))
+
                         # Text delta
                         if "text" in delta:
                             text = delta["text"]
