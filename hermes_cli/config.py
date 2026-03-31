@@ -732,6 +732,27 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "AWS_ACCESS_KEY_ID": {
+        "description": "AWS access key for Bedrock",
+        "prompt": "AWS Access Key ID",
+        "url": None,
+        "password": False,
+        "category": "provider",
+    },
+    "AWS_SECRET_ACCESS_KEY": {
+        "description": "AWS secret key for Bedrock",
+        "prompt": "AWS Secret Access Key",
+        "url": None,
+        "password": True,
+        "category": "provider",
+    },
+    "AWS_DEFAULT_REGION": {
+        "description": "AWS region for Bedrock (e.g. us-east-1)",
+        "prompt": "AWS Region",
+        "url": None,
+        "password": False,
+        "category": "provider",
+    },
 
     # ── Tool API keys ──
     "EXA_API_KEY": {
