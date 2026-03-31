@@ -665,8 +665,29 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    # AWS Bedrock (SigV4 auth — no API key needed, credentials resolved by adapter)
+    if provider == "bedrock":
+        cfg_base_url = ""
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if cfg_provider in ("bedrock", "aws-bedrock", "aws"):
+            cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
+        base_url = (
+            cfg_base_url
+            or os.getenv("AWS_BEDROCK_RUNTIME_ENDPOINT", "").strip().rstrip("/")
+            or "https://bedrock-runtime.us-east-1.amazonaws.com"
+        )
+        return {
+            "provider": "bedrock",
+            "api_mode": "bedrock_converse",
+            "base_url": base_url,
+            "api_key": "bedrock-sigv4-auth",  # Placeholder — Bedrock uses SigV4, not API keys
+            "source": "iam",
+            "requested_provider": requested_provider,
+        }
+
     # Anthropic (native Messages API)
     if provider == "anthropic":
+
         from agent.anthropic_adapter import resolve_anthropic_token
         token = resolve_anthropic_token()
         if not token:
