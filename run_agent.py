@@ -826,6 +826,7 @@ class AIAgent:
         # Bedrock credential resolver — initialized when api_mode is bedrock_converse
         self._bedrock_credentials = None
         self._bedrock_region = None
+        self._bedrock_tools_stripped = False  # Set True if model doesn't support tool calling
 
         if self.api_mode == "bedrock_converse":
             from agent.bedrock_adapter import BedrockCredentialResolver
@@ -4260,6 +4261,8 @@ class AIAgent:
                         api_kwargs, self._bedrock_credentials, self._bedrock_region,
                         endpoint_url=os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT"),
                     )
+                    if raw.get("_tools_stripped"):
+                        self._bedrock_tools_stripped = True
                     result["response"] = normalize_bedrock_response(raw)
                 else:
                     request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
@@ -4669,6 +4672,8 @@ class AIAgent:
                 reasoning_callback=_bedrock_reasoning_delta,
                 tool_gen_callback=_bedrock_tool_gen,
             )
+            if raw.get("_tools_stripped"):
+                self._bedrock_tools_stripped = True
             return normalize_bedrock_response(raw)
 
         def _call():
@@ -8483,6 +8488,18 @@ class AIAgent:
                     # Bedrock responses are already normalized to (assistant_message, finish_reason)
                     # by normalize_bedrock_response() in both streaming and non-streaming paths.
                     assistant_message, finish_reason = response
+
+                    # One-time warning if the model doesn't support tool calling
+                    if self._bedrock_tools_stripped and not getattr(self, '_bedrock_tools_warning_shown', False):
+                        self._bedrock_tools_warning_shown = True
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  This Bedrock model does not support tool calling — "
+                            f"running in chat-only mode (no file, terminal, or web tools)",
+                            force=True,
+                        )
+                        self._emit_status(
+                            "⚠️ Model does not support tool calling — running in chat-only mode"
+                        )
                 else:
                     assistant_message = response.choices[0].message
                 

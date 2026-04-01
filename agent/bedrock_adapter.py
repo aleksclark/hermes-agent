@@ -890,6 +890,19 @@ class BedrockAPIError(RuntimeError):
         super().__init__(f"Bedrock API error {status_code}: {detail}")
 
 
+def _is_tool_not_supported_error(error_code: str, error_message: str) -> bool:
+    """Check if a Bedrock error indicates the model doesn't support tool calling."""
+    msg_lower = error_message.lower()
+    # Check the message content regardless of error code — Bedrock uses
+    # different exception types depending on the path (HTTP vs event stream)
+    return any(kw in msg_lower for kw in (
+        "tool use", "tooluse", "tool_use",
+        "toolconfig", "tool_config", "tool calling",
+        "tools are not supported", "does not support tools",
+        "doesn't support tool",
+    ))
+
+
 def bedrock_converse_create(
     kwargs: dict,
     credentials: "BedrockCredentialResolver",
@@ -926,6 +939,7 @@ def bedrock_converse_create(
 
     # --- Retry loop ---
     credentials_refreshed = False
+    tools_stripped = False
 
     for attempt in range(_RETRY_MAX + 1):
         signed_headers = _sign_request(url, body, credentials, region)
@@ -933,7 +947,10 @@ def bedrock_converse_create(
 
         # Success
         if 200 <= response.status_code < 300:
-            return response.json()
+            result = response.json()
+            if tools_stripped:
+                result["_tools_stripped"] = True
+            return result
 
         # --- Parse error response ---
         request_id = response.headers.get("x-amzn-requestid", "")
@@ -980,6 +997,19 @@ def bedrock_converse_create(
                 delay += random.uniform(0, 0.5)
                 time.sleep(delay)
                 continue
+
+        # --- Tool calling not supported: retry without tools ---
+        if _is_tool_not_supported_error(error_code, error_message) and "toolConfig" in body_dict:
+            import logging
+            logging.warning(
+                "Bedrock model %s does not support tool calling — retrying without tools",
+                model_id,
+            )
+            body_dict.pop("toolConfig", None)
+            body = json.dumps(body_dict).encode("utf-8")
+            tools_stripped = True
+            # Don't count this as a retry attempt — just rebuild and continue
+            continue
 
         # --- Non-retryable or retries exhausted ---
         raise BedrockAPIError(
@@ -1299,6 +1329,27 @@ def bedrock_converse_stream(
             region=region,
             endpoint_url=endpoint_url,
         )
+
+    except BedrockAPIError as exc:
+        # --- Tool calling not supported: retry without tools ---
+        if _is_tool_not_supported_error(exc.error_code, str(exc)) and "toolConfig" in kwargs:
+            logging.warning(
+                "Bedrock model %s does not support tool calling — retrying without tools",
+                model_id,
+            )
+            kwargs_no_tools = {k: v for k, v in kwargs.items() if k != "toolConfig"}
+            result = bedrock_converse_stream(
+                kwargs=kwargs_no_tools,
+                credentials=credentials,
+                region=region,
+                endpoint_url=endpoint_url,
+                stream_delta_callback=stream_delta_callback,
+                reasoning_callback=reasoning_callback,
+                tool_gen_callback=tool_gen_callback,
+            )
+            result["_tools_stripped"] = True
+            return result
+        raise
 
     # --- Finalize any remaining open block ---
     _finalize_current_block()
