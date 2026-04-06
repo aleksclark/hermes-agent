@@ -1,19 +1,19 @@
 """Tests for /thread gateway slash command.
 
-Tests the _handle_thread_command handler (create, switch, list, delete
-named virtual threads within a single chat) across gateway platforms.
+Tests the _handle_thread_command handler which creates, lists, and closes
+REAL Telegram forum topics via the Bot API.
 """
 
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource, SessionStore, build_session_key
+from gateway.session import SessionSource, ForumThreadStore
 
 
 # ---------------------------------------------------------------------------
@@ -22,24 +22,37 @@ from gateway.session import SessionSource, SessionStore, build_session_key
 
 
 def _make_event(text="/thread", platform=Platform.TELEGRAM,
-                user_id="12345", chat_id="67890"):
+                user_id="12345", chat_id="67890", chat_type="group"):
     """Build a MessageEvent for testing."""
     source = SessionSource(
         platform=platform,
         user_id=user_id,
         chat_id=chat_id,
         user_name="testuser",
+        chat_type=chat_type,
     )
     return MessageEvent(text=text, source=source)
 
 
-def _make_runner(tmp_path):
-    """Create a bare GatewayRunner with a real SessionStore backed by tmp_path."""
+def _make_mock_bot():
+    """Create a mock Telegram Bot with forum topic methods."""
+    bot = AsyncMock()
+
+    # create_forum_topic returns an object with message_thread_id
+    topic_result = MagicMock()
+    topic_result.message_thread_id = 42
+    bot.create_forum_topic = AsyncMock(return_value=topic_result)
+    bot.close_forum_topic = AsyncMock()
+
+    return bot
+
+
+def _make_runner(tmp_path, bot=None):
+    """Create a bare GatewayRunner with a ForumThreadStore backed by tmp_path."""
     from gateway.config import GatewayConfig
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
-    runner.adapters = {}
     runner._voice_mode = {}
     runner._running_agents = {}
     runner._running_agents_ts = {}
@@ -50,133 +63,84 @@ def _make_runner(tmp_path):
     config.group_sessions_per_user = True
     runner.config = config
 
-    runner.session_store = SessionStore(
-        sessions_dir=config.sessions_dir,
-        config=config,
-    )
+    # Set up adapters with a mock Telegram adapter
+    mock_adapter = MagicMock()
+    mock_adapter._bot = bot or _make_mock_bot()
+    runner.adapters = {Platform.TELEGRAM: mock_adapter}
 
-    from gateway.session import ThreadStore
-    runner._thread_store = ThreadStore(config.sessions_dir / "threads.json")
+    runner._thread_store = ForumThreadStore(config.sessions_dir / "forum_threads.json")
 
     return runner
 
 
 # ---------------------------------------------------------------------------
-# ThreadStore unit tests (persistence layer)
+# ForumThreadStore unit tests (persistence layer)
 # ---------------------------------------------------------------------------
 
 
-class TestThreadStore:
-    """Tests for the ThreadStore persistence layer in gateway/session.py."""
+class TestForumThreadStore:
+    """Tests for the ForumThreadStore persistence layer in gateway/session.py."""
 
     def test_import(self):
-        from gateway.session import ThreadStore
-        assert ThreadStore is not None
+        from gateway.session import ForumThreadStore
+        assert ForumThreadStore is not None
 
-    def test_create_and_get_active(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
+    def test_add_and_get(self, tmp_path):
+        store = ForumThreadStore(tmp_path / "threads.json")
+        store.add("123", "research", 42)
+        assert store.get_topic_id("123", "research") == 42
 
-        store.set_active("chat:123", "research")
-        assert store.get_active_thread("chat:123") == "research"
+    def test_get_nonexistent(self, tmp_path):
+        store = ForumThreadStore(tmp_path / "threads.json")
+        assert store.get_topic_id("123", "nope") is None
 
     def test_list_threads_empty(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
-
-        assert store.list_threads("chat:123") == []
+        store = ForumThreadStore(tmp_path / "threads.json")
+        assert store.list_threads("123") == {}
 
     def test_list_threads(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
+        store = ForumThreadStore(tmp_path / "threads.json")
+        store.add("123", "alpha", 10)
+        store.add("123", "beta", 20)
+        threads = store.list_threads("123")
+        assert threads == {"alpha": 10, "beta": 20}
 
-        store.set_active("chat:123", "alpha")
-        store.set_active("chat:123", "beta")
-        threads = store.list_threads("chat:123")
-        assert "alpha" in threads
-        assert "beta" in threads
+    def test_remove_thread(self, tmp_path):
+        store = ForumThreadStore(tmp_path / "threads.json")
+        store.add("123", "alpha", 10)
+        store.add("123", "beta", 20)
+        removed_id = store.remove("123", "alpha")
+        assert removed_id == 10
+        assert "alpha" not in store.list_threads("123")
+        assert "beta" in store.list_threads("123")
 
-    def test_delete_thread(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
-
-        store.set_active("chat:123", "alpha")
-        store.set_active("chat:123", "beta")
-        store.delete_thread("chat:123", "alpha")
-        assert "alpha" not in store.list_threads("chat:123")
-        assert "beta" in store.list_threads("chat:123")
-
-    def test_delete_active_resets_to_none(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
-
-        store.set_active("chat:123", "research")
-        assert store.get_active_thread("chat:123") == "research"
-        store.delete_thread("chat:123", "research")
-        assert store.get_active_thread("chat:123") is None
-
-    def test_clear_active(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
-
-        store.set_active("chat:123", "research")
-        store.clear_active("chat:123")
-        assert store.get_active_thread("chat:123") is None
-        # Thread still exists
-        assert "research" in store.list_threads("chat:123")
+    def test_remove_nonexistent(self, tmp_path):
+        store = ForumThreadStore(tmp_path / "threads.json")
+        assert store.remove("123", "nope") is None
 
     def test_persistence_roundtrip(self, tmp_path):
-        from gateway.session import ThreadStore
         path = tmp_path / "threads.json"
+        store1 = ForumThreadStore(path)
+        store1.add("123", "alpha", 10)
+        store1.add("123", "beta", 20)
 
-        store1 = ThreadStore(path)
-        store1.set_active("chat:123", "alpha")
-        store1.set_active("chat:123", "beta")
-
-        store2 = ThreadStore(path)
-        assert store2.list_threads("chat:123") == store1.list_threads("chat:123")
-        assert store2.get_active_thread("chat:123") == "beta"
-
-    def test_thread_names_are_case_preserved(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
-
-        store.set_active("chat:123", "Research")
-        assert store.get_active_thread("chat:123") == "Research"
-        assert "Research" in store.list_threads("chat:123")
+        store2 = ForumThreadStore(path)
+        assert store2.list_threads("123") == {"alpha": 10, "beta": 20}
+        assert store2.get_topic_id("123", "alpha") == 10
 
     def test_different_chats_isolated(self, tmp_path):
-        from gateway.session import ThreadStore
-        store = ThreadStore(tmp_path / "threads.json")
+        store = ForumThreadStore(tmp_path / "threads.json")
+        store.add("aaa", "alpha", 10)
+        store.add("bbb", "beta", 20)
 
-        store.set_active("chat:aaa", "alpha")
-        store.set_active("chat:bbb", "beta")
+        assert store.list_threads("aaa") == {"alpha": 10}
+        assert store.list_threads("bbb") == {"beta": 20}
 
-        assert store.get_active_thread("chat:aaa") == "alpha"
-        assert store.get_active_thread("chat:bbb") == "beta"
-        assert store.list_threads("chat:aaa") == ["alpha"]
-        assert store.list_threads("chat:bbb") == ["beta"]
-
-
-# ---------------------------------------------------------------------------
-# Session key construction for dynamic threads
-# ---------------------------------------------------------------------------
-
-
-class TestDynamicThreadSessionKey:
-    """Verify that dynamic thread names produce correct session keys."""
-
-    def test_dynamic_thread_key_format(self):
-        """Dynamic thread session keys follow chat_id:thread:<name> pattern."""
-        from gateway.session import dynamic_thread_session_key
-        key = dynamic_thread_session_key("agent:main:telegram:dm:67890", "research")
-        assert key == "agent:main:telegram:dm:67890:thread:research"
-
-    def test_dynamic_thread_key_with_spaces(self):
-        """Thread names with spaces are preserved in the key."""
-        from gateway.session import dynamic_thread_session_key
-        key = dynamic_thread_session_key("agent:main:telegram:dm:67890", "my research")
-        assert key == "agent:main:telegram:dm:67890:thread:my research"
+    def test_remove_last_thread_cleans_chat(self, tmp_path):
+        store = ForumThreadStore(tmp_path / "threads.json")
+        store.add("123", "only", 10)
+        store.remove("123", "only")
+        assert store.list_threads("123") == {}
 
 
 # ---------------------------------------------------------------------------
@@ -188,119 +152,120 @@ class TestHandleThreadCommand:
     """Tests for GatewayRunner._handle_thread_command."""
 
     @pytest.mark.asyncio
-    async def test_no_args_shows_main(self, tmp_path):
-        """/thread with no args shows 'main' when no thread is active."""
+    async def test_no_args_shows_list_empty(self, tmp_path):
+        """/thread with no args lists threads (empty case)."""
         runner = _make_runner(tmp_path)
         event = _make_event(text="/thread")
         result = await runner._handle_thread_command(event)
-        assert "main" in result.lower()
+        assert "no managed forum topics" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_no_args_shows_active_thread(self, tmp_path):
-        """/thread with no args shows the active thread name."""
+    async def test_list_shows_threads(self, tmp_path):
+        """/thread list shows managed forum topics."""
         runner = _make_runner(tmp_path)
+        # Pre-populate a thread
+        runner._thread_store.add("67890", "research", 42)
 
-        # First create a thread
-        create_event = _make_event(text="/thread research")
-        await runner._handle_thread_command(create_event)
-
-        # Now query current
-        event = _make_event(text="/thread")
+        event = _make_event(text="/thread list")
         result = await runner._handle_thread_command(event)
         assert "research" in result
+        assert "42" in result
 
     @pytest.mark.asyncio
     async def test_create_thread(self, tmp_path):
-        """/thread <name> creates a new thread and switches to it."""
-        runner = _make_runner(tmp_path)
+        """/thread <name> creates a real Telegram forum topic."""
+        bot = _make_mock_bot()
+        runner = _make_runner(tmp_path, bot=bot)
+
         event = _make_event(text="/thread research")
         result = await runner._handle_thread_command(event)
+
+        bot.create_forum_topic.assert_awaited_once_with(chat_id=67890, name="research")
         assert "research" in result
+        assert "created" in result.lower()
+        # Verify it was stored
+        assert runner._thread_store.get_topic_id("67890", "research") == 42
 
     @pytest.mark.asyncio
-    async def test_switch_thread(self, tmp_path):
-        """/thread <name> switches to an existing thread."""
+    async def test_create_duplicate_thread(self, tmp_path):
+        """/thread <name> for existing thread warns instead of creating."""
         runner = _make_runner(tmp_path)
+        runner._thread_store.add("67890", "research", 42)
 
-        # Create two threads
-        await runner._handle_thread_command(_make_event(text="/thread alpha"))
-        await runner._handle_thread_command(_make_event(text="/thread beta"))
-
-        # Switch back to alpha
-        result = await runner._handle_thread_command(_make_event(text="/thread alpha"))
-        assert "alpha" in result
+        event = _make_event(text="/thread research")
+        result = await runner._handle_thread_command(event)
+        assert "already exists" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_switch_to_main(self, tmp_path):
-        """/thread main returns to the default session."""
-        runner = _make_runner(tmp_path)
+    async def test_close_thread(self, tmp_path):
+        """/thread close <name> calls close_forum_topic and removes from store."""
+        bot = _make_mock_bot()
+        runner = _make_runner(tmp_path, bot=bot)
+        runner._thread_store.add("67890", "research", 42)
 
-        await runner._handle_thread_command(_make_event(text="/thread research"))
-        result = await runner._handle_thread_command(_make_event(text="/thread main"))
-        assert "main" in result.lower()
+        event = _make_event(text="/thread close research")
+        result = await runner._handle_thread_command(event)
 
-    @pytest.mark.asyncio
-    async def test_list_threads(self, tmp_path):
-        """/thread list shows all active threads."""
-        runner = _make_runner(tmp_path)
-
-        await runner._handle_thread_command(_make_event(text="/thread alpha"))
-        await runner._handle_thread_command(_make_event(text="/thread beta"))
-
-        result = await runner._handle_thread_command(_make_event(text="/thread list"))
-        assert "alpha" in result
-        assert "beta" in result
+        bot.close_forum_topic.assert_awaited_once_with(chat_id=67890, message_thread_id=42)
+        assert "closed" in result.lower()
+        assert runner._thread_store.get_topic_id("67890", "research") is None
 
     @pytest.mark.asyncio
-    async def test_list_threads_empty(self, tmp_path):
-        """/thread list when no threads exist."""
-        runner = _make_runner(tmp_path)
-        result = await runner._handle_thread_command(_make_event(text="/thread list"))
-        assert "no" in result.lower() or "none" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_delete_thread(self, tmp_path):
-        """/thread delete <name> removes a thread."""
-        runner = _make_runner(tmp_path)
-
-        await runner._handle_thread_command(_make_event(text="/thread research"))
-        result = await runner._handle_thread_command(
-            _make_event(text="/thread delete research")
-        )
-        assert "delete" in result.lower() or "removed" in result.lower()
-
-        # Thread no longer in list
-        list_result = await runner._handle_thread_command(
-            _make_event(text="/thread list")
-        )
-        assert "research" not in list_result
-
-    @pytest.mark.asyncio
-    async def test_delete_nonexistent_thread(self, tmp_path):
-        """/thread delete <nonexistent> returns error."""
+    async def test_close_nonexistent_thread(self, tmp_path):
+        """/thread close <nonexistent> returns error."""
         runner = _make_runner(tmp_path)
         result = await runner._handle_thread_command(
-            _make_event(text="/thread delete nonexistent")
+            _make_event(text="/thread close nonexistent")
         )
-        assert "not found" in result.lower() or "no thread" in result.lower()
+        assert "not found" in result.lower() or "no managed" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_delete_main_rejected(self, tmp_path):
-        """/thread delete main is rejected — cannot delete the default."""
+    async def test_close_no_name(self, tmp_path):
+        """/thread close with no name shows usage."""
         runner = _make_runner(tmp_path)
         result = await runner._handle_thread_command(
-            _make_event(text="/thread delete main")
+            _make_event(text="/thread close")
         )
-        assert "cannot" in result.lower() or "can't" in result.lower()
+        assert "usage" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_dm_rejected(self, tmp_path):
+        """/thread in a DM returns helpful error."""
+        runner = _make_runner(tmp_path)
+        event = _make_event(text="/thread research", chat_type="dm")
+        result = await runner._handle_thread_command(event)
+        assert "dm" in result.lower() or "groups" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_non_telegram_rejected(self, tmp_path):
+        """/thread on non-Telegram platform returns error."""
+        runner = _make_runner(tmp_path)
+        event = _make_event(text="/thread research", platform=Platform.DISCORD)
+        result = await runner._handle_thread_command(event)
+        assert "telegram" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_create_permission_error(self, tmp_path):
+        """/thread <name> when bot lacks permissions shows helpful message."""
+        bot = _make_mock_bot()
+        bot.create_forum_topic = AsyncMock(
+            side_effect=Exception("Not enough rights to manage topics")
+        )
+        runner = _make_runner(tmp_path, bot=bot)
+
+        event = _make_event(text="/thread research")
+        result = await runner._handle_thread_command(event)
+        assert "permission" in result.lower() or "rights" in result.lower()
 
     @pytest.mark.asyncio
     async def test_threads_isolated_per_chat(self, tmp_path):
         """Threads in different chats are independent."""
-        runner = _make_runner(tmp_path)
+        bot = _make_mock_bot()
+        runner = _make_runner(tmp_path, bot=bot)
 
+        # Create threads in different chats
         event_a = _make_event(text="/thread alpha", chat_id="111")
         event_b = _make_event(text="/thread beta", chat_id="222")
-
         await runner._handle_thread_command(event_a)
         await runner._handle_thread_command(event_b)
 
@@ -312,21 +277,26 @@ class TestHandleThreadCommand:
         assert "beta" not in list_a
 
     @pytest.mark.asyncio
-    async def test_thread_sessions_independent(self, tmp_path):
-        """Each thread gets its own session key."""
+    async def test_close_api_error(self, tmp_path):
+        """/thread close shows error if API call fails."""
+        bot = _make_mock_bot()
+        bot.close_forum_topic = AsyncMock(side_effect=Exception("API error"))
+        runner = _make_runner(tmp_path, bot=bot)
+        runner._thread_store.add("67890", "research", 42)
+
+        event = _make_event(text="/thread close research")
+        result = await runner._handle_thread_command(event)
+        assert "failed" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_bot_not_connected(self, tmp_path):
+        """/thread when bot is not connected returns error."""
         runner = _make_runner(tmp_path)
+        runner.adapters = {}  # No adapters
 
-        # Create a thread
-        await runner._handle_thread_command(_make_event(text="/thread research"))
-
-        # The thread store should have an active thread
-        source = SessionSource(
-            platform=Platform.TELEGRAM, user_id="12345",
-            chat_id="67890", user_name="testuser",
-        )
-        base_key = build_session_key(source)
-        active = runner._thread_store.get_active_thread(base_key)
-        assert active == "research"
+        event = _make_event(text="/thread research")
+        result = await runner._handle_thread_command(event)
+        assert "not connected" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -356,5 +326,4 @@ class TestThreadCommandRegistry:
         from hermes_cli.commands import resolve_command
         cmd = resolve_command("thread")
         assert "list" in cmd.subcommands
-        assert "delete" in cmd.subcommands
-        assert "main" in cmd.subcommands
+        assert "close" in cmd.subcommands

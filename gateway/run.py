@@ -219,11 +219,10 @@ from gateway.session import (
     SessionStore,
     SessionSource,
     SessionContext,
-    ThreadStore,
+    ForumThreadStore,
     build_session_context,
     build_session_context_prompt,
     build_session_key,
-    dynamic_thread_session_key,
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
@@ -483,7 +482,7 @@ class GatewayRunner:
             self.config.sessions_dir, self.config,
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
-        self._thread_store = ThreadStore(self.config.sessions_dir / "threads.json")
+        self._thread_store = ForumThreadStore(self.config.sessions_dir / "forum_threads.json")
         self.delivery_router = DeliveryRouter(self.config)
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -757,17 +756,11 @@ class GatewayRunner:
         return self._exit_reason
 
     def _session_key_for_source(self, source: SessionSource) -> str:
-        """Resolve the current session key for a source, honoring gateway config and active threads."""
+        """Resolve the current session key for a source, honoring gateway config."""
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
                 session_key = self.session_store._generate_session_key(source)
                 if isinstance(session_key, str) and session_key:
-                    # Check for active virtual thread
-                    thread_store = getattr(self, "_thread_store", None)
-                    if thread_store:
-                        active_thread = thread_store.get_active_thread(session_key)
-                        if active_thread:
-                            return dynamic_thread_session_key(session_key, active_thread)
                     return session_key
             except Exception:
                 pass
@@ -4907,74 +4900,99 @@ class GatewayRunner:
         return f"↻ Resumed session **{title}**{msg_part}. Conversation restored."
 
     async def _handle_thread_command(self, event: MessageEvent) -> str:
-        """Handle /thread — create, switch, list, or delete named virtual threads.
+        """Handle /thread — create, list, or close real Telegram forum topics.
+
+        Forum topics are only available in groups/supergroups with topics
+        enabled.  They are NOT available in DMs.
 
         Usage:
-            /thread              — show current thread name
-            /thread <name>       — create or switch to a named thread
-            /thread main         — return to the default (main) session
-            /thread list         — list all threads for this chat
-            /thread delete <name> — delete a named thread
+            /thread              — list managed threads (same as /thread list)
+            /thread <name>       — create a new forum topic with the given name
+            /thread list         — list all managed forum topics for this chat
+            /thread close <name> — close a forum topic by name
         """
         source = event.source
-        base_key = build_session_key(
-            source,
-            group_sessions_per_user=getattr(
-                getattr(self, "config", None), "group_sessions_per_user", True
-            ),
-        )
+        chat_id = source.chat_id
         args = event.get_command_args().strip()
 
-        # /thread (no args) — show current thread
-        if not args:
-            active = self._thread_store.get_active_thread(base_key)
-            if active:
-                return f"📌 Current thread: **{active}**"
-            return "📌 Current thread: **main** (default)"
+        # Check platform — forum topics only work on Telegram
+        if source.platform != Platform.TELEGRAM:
+            return "Forum threads are only supported on Telegram (groups/supergroups with topics enabled)."
+
+        # Check chat type — not available in DMs
+        if source.chat_type == "dm":
+            return (
+                "Forum topics are only available in groups/supergroups with "
+                "topics enabled. They cannot be used in DMs."
+            )
+
+        # Get the Telegram bot instance
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if not adapter or not getattr(adapter, "_bot", None):
+            return "Telegram bot is not connected."
+        bot = adapter._bot
+
+        # /thread (no args) or /thread list — list managed threads
+        if not args or args.lower() == "list":
+            threads = self._thread_store.list_threads(chat_id)
+            if not threads:
+                return "No managed forum topics yet. Use `/thread <name>` to create one."
+            lines = ["\U0001f4cb **Forum Topics**\n"]
+            for name, topic_id in threads.items():
+                lines.append(f"\u2022 **{name}** (topic ID: {topic_id})")
+            lines.append("\nCreate: `/thread <name>`\nClose: `/thread close <name>`")
+            return "\n".join(lines)
 
         parts = args.split(None, 1)
         sub = parts[0].lower()
 
-        # /thread list
-        if sub == "list":
-            threads = self._thread_store.list_threads(base_key)
-            if not threads:
-                return "No threads created yet. Use `/thread <name>` to create one."
-            active = self._thread_store.get_active_thread(base_key)
-            lines = ["📋 **Threads**\n"]
-            # Always show main first
-            marker = " ← active" if not active else ""
-            lines.append(f"• **main** (default){marker}")
-            for t in threads:
-                marker = " ← active" if t == active else ""
-                lines.append(f"• **{t}**{marker}")
-            lines.append("\nSwitch: `/thread <name>`")
-            return "\n".join(lines)
-
-        # /thread delete <name>
-        if sub == "delete":
+        # /thread close <name>
+        if sub == "close":
             name = parts[1].strip() if len(parts) > 1 else ""
             if not name:
-                return "Usage: `/thread delete <name>`"
-            if name.lower() == "main":
-                return "Cannot delete the main thread."
-            if self._thread_store.delete_thread(base_key, name):
-                return f"🗑️ Thread **{name}** deleted."
-            return f"Thread **{name}** not found."
+                return "Usage: `/thread close <name>`"
+            topic_id = self._thread_store.get_topic_id(chat_id, name)
+            if topic_id is None:
+                return f"No managed thread named **{name}** found."
+            try:
+                await bot.close_forum_topic(chat_id=int(chat_id), message_thread_id=topic_id)
+            except Exception as e:
+                return f"Failed to close topic **{name}**: {e}"
+            self._thread_store.remove(chat_id, name)
+            return f"\u2705 Forum topic **{name}** closed."
 
-        # /thread main — return to default session
+        # /thread <name> — create a new forum topic
         name = args
-        if name.lower() == "main":
-            self._thread_store.clear_active(base_key)
-            return "↩️ Switched to **main** (default) thread."
+        # Check if we already track a topic with this name
+        existing_id = self._thread_store.get_topic_id(chat_id, name)
+        if existing_id is not None:
+            return (
+                f"A forum topic named **{name}** already exists (topic ID: {existing_id}). "
+                f"Reply in the topic to continue chatting."
+            )
 
-        # /thread <name> — create or switch
-        existing = self._thread_store.list_threads(base_key)
-        is_new = name not in existing
-        self._thread_store.set_active(base_key, name)
-        if is_new:
-            return f"🧵 Created and switched to thread **{name}**."
-        return f"🧵 Switched to thread **{name}**."
+        try:
+            topic = await bot.create_forum_topic(chat_id=int(chat_id), name=name)
+            topic_id = topic.message_thread_id
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "not enough rights" in error_msg or "forbidden" in error_msg:
+                return (
+                    "The bot doesn't have permission to manage topics in this chat. "
+                    "Make sure the bot is an admin with 'Manage Topics' permission."
+                )
+            if "topics" in error_msg and ("not found" in error_msg or "supergroup" in error_msg):
+                return (
+                    "This chat doesn't support forum topics. "
+                    "Enable topics in group settings first."
+                )
+            return f"Failed to create forum topic: {e}"
+
+        self._thread_store.add(chat_id, name, topic_id)
+        return (
+            f"\U0001f9f5 Forum topic **{name}** created! "
+            f"Reply in the new topic to start chatting."
+        )
 
     async def _handle_branch_command(self, event: MessageEvent) -> str:
         """Handle /branch [name] — fork the current session into a new independent copy.
