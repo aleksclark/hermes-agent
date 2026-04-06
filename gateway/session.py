@@ -1051,29 +1051,25 @@ def build_session_context(
 
 
 # ---------------------------------------------------------------------------
-# Dynamic virtual threads
+# Forum thread management (real Telegram forum topics)
 # ---------------------------------------------------------------------------
 
 
-def dynamic_thread_session_key(base_session_key: str, thread_name: str) -> str:
-    """Build a session key for a named virtual thread.
+class ForumThreadStore:
+    """Persistent store mapping (chat_id, thread_name) -> Telegram forum topic_id.
 
-    Appends ``:thread:<name>`` to the base session key so each thread
-    gets its own independent conversation history.
-    """
-    return f"{base_session_key}:thread:{thread_name}"
+    Used by the ``/thread`` command to track forum topics created via the
+    Bot API ``createForumTopic``.  Each chat keeps its own dict of
+    ``name -> message_thread_id``.  Backed by a single JSON file.
 
-
-class ThreadStore:
-    """Persistent store for per-chat virtual thread state.
-
-    Tracks which named threads exist for a given base session key and
-    which thread is currently active.  Backed by a single JSON file.
+    Note: Forum topics only work in groups/supergroups with topics enabled.
+    They are not available in DMs.
     """
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._data: Dict[str, Dict[str, Any]] = {}
+        # Structure: { "chat_id": { "name": topic_id, ... }, ... }
+        self._data: Dict[str, Dict[str, int]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -1103,45 +1099,28 @@ class ThreadStore:
                 pass
             raise
 
-    def _ensure_chat(self, base_key: str) -> Dict[str, Any]:
-        if base_key not in self._data:
-            self._data[base_key] = {"threads": [], "active": None}
-        return self._data[base_key]
+    def add(self, chat_id: str, name: str, topic_id: int) -> None:
+        """Record a forum topic for the given chat."""
+        if chat_id not in self._data:
+            self._data[chat_id] = {}
+        self._data[chat_id][name] = topic_id
+        self._save()
 
-    def get_active_thread(self, base_key: str) -> Optional[str]:
-        chat = self._data.get(base_key)
-        if not chat:
+    def get_topic_id(self, chat_id: str, name: str) -> Optional[int]:
+        """Return the topic_id for *name* in *chat_id*, or None."""
+        return self._data.get(chat_id, {}).get(name)
+
+    def list_threads(self, chat_id: str) -> Dict[str, int]:
+        """Return {name: topic_id} for all tracked topics in *chat_id*."""
+        return dict(self._data.get(chat_id, {}))
+
+    def remove(self, chat_id: str, name: str) -> Optional[int]:
+        """Remove a thread by name. Returns the topic_id if found, else None."""
+        chat = self._data.get(chat_id)
+        if not chat or name not in chat:
             return None
-        return chat.get("active")
-
-    def set_active(self, base_key: str, thread_name: str) -> None:
-        chat = self._ensure_chat(base_key)
-        if thread_name not in chat["threads"]:
-            chat["threads"].append(thread_name)
-        chat["active"] = thread_name
-        self._save()
-
-    def clear_active(self, base_key: str) -> None:
-        chat = self._data.get(base_key)
-        if chat:
-            chat["active"] = None
-            self._save()
-
-    def list_threads(self, base_key: str) -> List[str]:
-        chat = self._data.get(base_key)
+        topic_id = chat.pop(name)
         if not chat:
-            return []
-        return list(chat.get("threads", []))
-
-    def delete_thread(self, base_key: str, thread_name: str) -> bool:
-        chat = self._data.get(base_key)
-        if not chat:
-            return False
-        threads = chat.get("threads", [])
-        if thread_name not in threads:
-            return False
-        threads.remove(thread_name)
-        if chat.get("active") == thread_name:
-            chat["active"] = None
+            del self._data[chat_id]
         self._save()
-        return True
+        return topic_id
