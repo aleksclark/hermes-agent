@@ -80,6 +80,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
+    CommandDef("thread", "Create or switch named conversation threads", "Session",
+               gateway_only=True, args_hint="[name|list|delete]",
+               subcommands=("list", "delete", "main")),
 
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",

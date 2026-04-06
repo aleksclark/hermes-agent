@@ -219,9 +219,11 @@ from gateway.session import (
     SessionStore,
     SessionSource,
     SessionContext,
+    ThreadStore,
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    dynamic_thread_session_key,
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
@@ -481,6 +483,7 @@ class GatewayRunner:
             self.config.sessions_dir, self.config,
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
+        self._thread_store = ThreadStore(self.config.sessions_dir / "threads.json")
         self.delivery_router = DeliveryRouter(self.config)
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -754,11 +757,17 @@ class GatewayRunner:
         return self._exit_reason
 
     def _session_key_for_source(self, source: SessionSource) -> str:
-        """Resolve the current session key for a source, honoring gateway config when available."""
+        """Resolve the current session key for a source, honoring gateway config and active threads."""
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
                 session_key = self.session_store._generate_session_key(source)
                 if isinstance(session_key, str) and session_key:
+                    # Check for active virtual thread
+                    thread_store = getattr(self, "_thread_store", None)
+                    if thread_store:
+                        active_thread = thread_store.get_active_thread(session_key)
+                        if active_thread:
+                            return dynamic_thread_session_key(session_key, active_thread)
                     return session_key
             except Exception:
                 pass
@@ -2050,6 +2059,9 @@ class GatewayRunner:
 
         if canonical == "resume":
             return await self._handle_resume_command(event)
+
+        if canonical == "thread":
+            return await self._handle_thread_command(event)
 
         if canonical == "branch":
             return await self._handle_branch_command(event)
@@ -4893,6 +4905,76 @@ class GatewayRunner:
         msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
 
         return f"↻ Resumed session **{title}**{msg_part}. Conversation restored."
+
+    async def _handle_thread_command(self, event: MessageEvent) -> str:
+        """Handle /thread — create, switch, list, or delete named virtual threads.
+
+        Usage:
+            /thread              — show current thread name
+            /thread <name>       — create or switch to a named thread
+            /thread main         — return to the default (main) session
+            /thread list         — list all threads for this chat
+            /thread delete <name> — delete a named thread
+        """
+        source = event.source
+        base_key = build_session_key(
+            source,
+            group_sessions_per_user=getattr(
+                getattr(self, "config", None), "group_sessions_per_user", True
+            ),
+        )
+        args = event.get_command_args().strip()
+
+        # /thread (no args) — show current thread
+        if not args:
+            active = self._thread_store.get_active_thread(base_key)
+            if active:
+                return f"📌 Current thread: **{active}**"
+            return "📌 Current thread: **main** (default)"
+
+        parts = args.split(None, 1)
+        sub = parts[0].lower()
+
+        # /thread list
+        if sub == "list":
+            threads = self._thread_store.list_threads(base_key)
+            if not threads:
+                return "No threads created yet. Use `/thread <name>` to create one."
+            active = self._thread_store.get_active_thread(base_key)
+            lines = ["📋 **Threads**\n"]
+            # Always show main first
+            marker = " ← active" if not active else ""
+            lines.append(f"• **main** (default){marker}")
+            for t in threads:
+                marker = " ← active" if t == active else ""
+                lines.append(f"• **{t}**{marker}")
+            lines.append("\nSwitch: `/thread <name>`")
+            return "\n".join(lines)
+
+        # /thread delete <name>
+        if sub == "delete":
+            name = parts[1].strip() if len(parts) > 1 else ""
+            if not name:
+                return "Usage: `/thread delete <name>`"
+            if name.lower() == "main":
+                return "Cannot delete the main thread."
+            if self._thread_store.delete_thread(base_key, name):
+                return f"🗑️ Thread **{name}** deleted."
+            return f"Thread **{name}** not found."
+
+        # /thread main — return to default session
+        name = args
+        if name.lower() == "main":
+            self._thread_store.clear_active(base_key)
+            return "↩️ Switched to **main** (default) thread."
+
+        # /thread <name> — create or switch
+        existing = self._thread_store.list_threads(base_key)
+        is_new = name not in existing
+        self._thread_store.set_active(base_key, name)
+        if is_new:
+            return f"🧵 Created and switched to thread **{name}**."
+        return f"🧵 Switched to thread **{name}**."
 
     async def _handle_branch_command(self, event: MessageEvent) -> str:
         """Handle /branch [name] — fork the current session into a new independent copy.

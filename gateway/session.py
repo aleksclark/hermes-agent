@@ -1048,3 +1048,100 @@ def build_session_context(
         context.updated_at = session_entry.updated_at
     
     return context
+
+
+# ---------------------------------------------------------------------------
+# Dynamic virtual threads
+# ---------------------------------------------------------------------------
+
+
+def dynamic_thread_session_key(base_session_key: str, thread_name: str) -> str:
+    """Build a session key for a named virtual thread.
+
+    Appends ``:thread:<name>`` to the base session key so each thread
+    gets its own independent conversation history.
+    """
+    return f"{base_session_key}:thread:{thread_name}"
+
+
+class ThreadStore:
+    """Persistent store for per-chat virtual thread state.
+
+    Tracks which named threads exist for a given base session key and
+    which thread is currently active.  Backed by a single JSON file.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._data: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self._path.exists():
+            try:
+                with open(self._path, "r", encoding="utf-8") as f:
+                    self._data = json.load(f)
+            except Exception:
+                self._data = {}
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(
+            dir=str(self._path.parent), suffix=".tmp", prefix=".threads_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def _ensure_chat(self, base_key: str) -> Dict[str, Any]:
+        if base_key not in self._data:
+            self._data[base_key] = {"threads": [], "active": None}
+        return self._data[base_key]
+
+    def get_active_thread(self, base_key: str) -> Optional[str]:
+        chat = self._data.get(base_key)
+        if not chat:
+            return None
+        return chat.get("active")
+
+    def set_active(self, base_key: str, thread_name: str) -> None:
+        chat = self._ensure_chat(base_key)
+        if thread_name not in chat["threads"]:
+            chat["threads"].append(thread_name)
+        chat["active"] = thread_name
+        self._save()
+
+    def clear_active(self, base_key: str) -> None:
+        chat = self._data.get(base_key)
+        if chat:
+            chat["active"] = None
+            self._save()
+
+    def list_threads(self, base_key: str) -> List[str]:
+        chat = self._data.get(base_key)
+        if not chat:
+            return []
+        return list(chat.get("threads", []))
+
+    def delete_thread(self, base_key: str, thread_name: str) -> bool:
+        chat = self._data.get(base_key)
+        if not chat:
+            return False
+        threads = chat.get("threads", [])
+        if thread_name not in threads:
+            return False
+        threads.remove(thread_name)
+        if chat.get("active") == thread_name:
+            chat["active"] = None
+        self._save()
+        return True
