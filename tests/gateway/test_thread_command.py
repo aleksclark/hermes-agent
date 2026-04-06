@@ -229,12 +229,14 @@ class TestHandleThreadCommand:
         assert "usage" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_dm_rejected(self, tmp_path):
-        """/thread in a DM returns helpful error."""
-        runner = _make_runner(tmp_path)
+    async def test_dm_create_succeeds(self, tmp_path):
+        """/thread in a DM creates a forum topic (Bot API 9.4+)."""
+        bot = _make_mock_bot()
+        runner = _make_runner(tmp_path, bot=bot)
         event = _make_event(text="/thread research", chat_type="dm")
         result = await runner._handle_thread_command(event)
-        assert "dm" in result.lower() or "groups" in result.lower()
+        assert "created" in result.lower()
+        bot.create_forum_topic.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_non_telegram_rejected(self, tmp_path):

@@ -1062,8 +1062,7 @@ class ForumThreadStore:
     Bot API ``createForumTopic``.  Each chat keeps its own dict of
     ``name -> message_thread_id``.  Backed by a single JSON file.
 
-    Note: Forum topics only work in groups/supergroups with topics enabled.
-    They are not available in DMs.
+    Works in both DMs (Bot API 9.4+) and groups/supergroups with topics enabled.
     """
 
     def __init__(self, path: Path) -> None:

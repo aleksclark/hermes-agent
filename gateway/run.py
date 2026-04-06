@@ -4902,8 +4902,9 @@ class GatewayRunner:
     async def _handle_thread_command(self, event: MessageEvent) -> str:
         """Handle /thread — create, list, or close real Telegram forum topics.
 
-        Forum topics are only available in groups/supergroups with topics
-        enabled.  They are NOT available in DMs.
+        Works in both DMs (Bot API 9.4+) and groups/supergroups with topics
+        enabled.  Each topic gets its own independent session via the existing
+        thread_id-based session routing.
 
         Usage:
             /thread              — list managed threads (same as /thread list)
@@ -4917,14 +4918,7 @@ class GatewayRunner:
 
         # Check platform — forum topics only work on Telegram
         if source.platform != Platform.TELEGRAM:
-            return "Forum threads are only supported on Telegram (groups/supergroups with topics enabled)."
-
-        # Check chat type — not available in DMs
-        if source.chat_type == "dm":
-            return (
-                "Forum topics are only available in groups/supergroups with "
-                "topics enabled. They cannot be used in DMs."
-            )
+            return "Forum threads are only supported on Telegram."
 
         # Get the Telegram bot instance
         adapter = self.adapters.get(Platform.TELEGRAM)
@@ -4984,7 +4978,8 @@ class GatewayRunner:
             if "topics" in error_msg and ("not found" in error_msg or "supergroup" in error_msg):
                 return (
                     "This chat doesn't support forum topics. "
-                    "Enable topics in group settings first."
+                    "For groups, enable topics in settings. "
+                    "For DMs, ensure the bot server supports Bot API 9.4+."
                 )
             return f"Failed to create forum topic: {e}"
 
