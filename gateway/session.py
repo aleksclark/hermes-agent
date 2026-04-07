@@ -1048,3 +1048,78 @@ def build_session_context(
         context.updated_at = session_entry.updated_at
     
     return context
+
+
+# ---------------------------------------------------------------------------
+# Forum thread management (real Telegram forum topics)
+# ---------------------------------------------------------------------------
+
+
+class ForumThreadStore:
+    """Persistent store mapping (chat_id, thread_name) -> Telegram forum topic_id.
+
+    Used by the ``/thread`` command to track forum topics created via the
+    Bot API ``createForumTopic``.  Each chat keeps its own dict of
+    ``name -> message_thread_id``.  Backed by a single JSON file.
+
+    Works in both DMs (Bot API 9.4+) and groups/supergroups with topics enabled.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        # Structure: { "chat_id": { "name": topic_id, ... }, ... }
+        self._data: Dict[str, Dict[str, int]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self._path.exists():
+            try:
+                with open(self._path, "r", encoding="utf-8") as f:
+                    self._data = json.load(f)
+            except Exception:
+                self._data = {}
+
+    def _save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(
+            dir=str(self._path.parent), suffix=".tmp", prefix=".threads_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def add(self, chat_id: str, name: str, topic_id: int) -> None:
+        """Record a forum topic for the given chat."""
+        if chat_id not in self._data:
+            self._data[chat_id] = {}
+        self._data[chat_id][name] = topic_id
+        self._save()
+
+    def get_topic_id(self, chat_id: str, name: str) -> Optional[int]:
+        """Return the topic_id for *name* in *chat_id*, or None."""
+        return self._data.get(chat_id, {}).get(name)
+
+    def list_threads(self, chat_id: str) -> Dict[str, int]:
+        """Return {name: topic_id} for all tracked topics in *chat_id*."""
+        return dict(self._data.get(chat_id, {}))
+
+    def remove(self, chat_id: str, name: str) -> Optional[int]:
+        """Remove a thread by name. Returns the topic_id if found, else None."""
+        chat = self._data.get(chat_id)
+        if not chat or name not in chat:
+            return None
+        topic_id = chat.pop(name)
+        if not chat:
+            del self._data[chat_id]
+        self._save()
+        return topic_id

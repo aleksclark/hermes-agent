@@ -80,6 +80,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
+    CommandDef("thread", "Create or manage real Telegram forum topics", "Session",
+               gateway_only=True, args_hint="[name|list|close]",
+               subcommands=("list", "close")),
 
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",

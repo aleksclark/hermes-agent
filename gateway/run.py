@@ -219,6 +219,7 @@ from gateway.session import (
     SessionStore,
     SessionSource,
     SessionContext,
+    ForumThreadStore,
     build_session_context,
     build_session_context_prompt,
     build_session_key,
@@ -481,6 +482,7 @@ class GatewayRunner:
             self.config.sessions_dir, self.config,
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
+        self._thread_store = ForumThreadStore(self.config.sessions_dir / "forum_threads.json")
         self.delivery_router = DeliveryRouter(self.config)
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -754,7 +756,7 @@ class GatewayRunner:
         return self._exit_reason
 
     def _session_key_for_source(self, source: SessionSource) -> str:
-        """Resolve the current session key for a source, honoring gateway config when available."""
+        """Resolve the current session key for a source, honoring gateway config."""
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
                 session_key = self.session_store._generate_session_key(source)
@@ -2063,6 +2065,9 @@ class GatewayRunner:
 
         if canonical == "resume":
             return await self._handle_resume_command(event)
+
+        if canonical == "thread":
+            return await self._handle_thread_command(event)
 
         if canonical == "branch":
             return await self._handle_branch_command(event)
@@ -4906,6 +4911,96 @@ class GatewayRunner:
         msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
 
         return f"↻ Resumed session **{title}**{msg_part}. Conversation restored."
+
+    async def _handle_thread_command(self, event: MessageEvent) -> str:
+        """Handle /thread — create, list, or close real Telegram forum topics.
+
+        Works in both DMs (Bot API 9.4+) and groups/supergroups with topics
+        enabled.  Each topic gets its own independent session via the existing
+        thread_id-based session routing.
+
+        Usage:
+            /thread              — list managed threads (same as /thread list)
+            /thread <name>       — create a new forum topic with the given name
+            /thread list         — list all managed forum topics for this chat
+            /thread close <name> — close a forum topic by name
+        """
+        source = event.source
+        chat_id = source.chat_id
+        args = event.get_command_args().strip()
+
+        # Check platform — forum topics only work on Telegram
+        if source.platform != Platform.TELEGRAM:
+            return "Forum threads are only supported on Telegram."
+
+        # Get the Telegram bot instance
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if not adapter or not getattr(adapter, "_bot", None):
+            return "Telegram bot is not connected."
+        bot = adapter._bot
+
+        # /thread (no args) or /thread list — list managed threads
+        if not args or args.lower() == "list":
+            threads = self._thread_store.list_threads(chat_id)
+            if not threads:
+                return "No managed forum topics yet. Use `/thread <name>` to create one."
+            lines = ["\U0001f4cb **Forum Topics**\n"]
+            for name, topic_id in threads.items():
+                lines.append(f"\u2022 **{name}** (topic ID: {topic_id})")
+            lines.append("\nCreate: `/thread <name>`\nClose: `/thread close <name>`")
+            return "\n".join(lines)
+
+        parts = args.split(None, 1)
+        sub = parts[0].lower()
+
+        # /thread close <name>
+        if sub == "close":
+            name = parts[1].strip() if len(parts) > 1 else ""
+            if not name:
+                return "Usage: `/thread close <name>`"
+            topic_id = self._thread_store.get_topic_id(chat_id, name)
+            if topic_id is None:
+                return f"No managed thread named **{name}** found."
+            try:
+                await bot.close_forum_topic(chat_id=int(chat_id), message_thread_id=topic_id)
+            except Exception as e:
+                return f"Failed to close topic **{name}**: {e}"
+            self._thread_store.remove(chat_id, name)
+            return f"\u2705 Forum topic **{name}** closed."
+
+        # /thread <name> — create a new forum topic
+        name = args
+        # Check if we already track a topic with this name
+        existing_id = self._thread_store.get_topic_id(chat_id, name)
+        if existing_id is not None:
+            return (
+                f"A forum topic named **{name}** already exists (topic ID: {existing_id}). "
+                f"Reply in the topic to continue chatting."
+            )
+
+        try:
+            topic = await bot.create_forum_topic(chat_id=int(chat_id), name=name)
+            topic_id = topic.message_thread_id
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "not enough rights" in error_msg or "forbidden" in error_msg:
+                return (
+                    "The bot doesn't have permission to manage topics in this chat. "
+                    "Make sure the bot is an admin with 'Manage Topics' permission."
+                )
+            if "topics" in error_msg and ("not found" in error_msg or "supergroup" in error_msg):
+                return (
+                    "This chat doesn't support forum topics. "
+                    "For groups, enable topics in settings. "
+                    "For DMs, ensure the bot server supports Bot API 9.4+."
+                )
+            return f"Failed to create forum topic: {e}"
+
+        self._thread_store.add(chat_id, name, topic_id)
+        return (
+            f"\U0001f9f5 Forum topic **{name}** created! "
+            f"Reply in the new topic to start chatting."
+        )
 
     async def _handle_branch_command(self, event: MessageEvent) -> str:
         """Handle /branch [name] — fork the current session into a new independent copy.
