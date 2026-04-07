@@ -260,6 +260,34 @@ class TestHandleThreadCommand:
         assert "permission" in result.lower() or "rights" in result.lower()
 
     @pytest.mark.asyncio
+    async def test_create_not_a_forum_error_group(self, tmp_path):
+        """/thread in a group that isn't a forum shows group-specific guidance."""
+        bot = _make_mock_bot()
+        bot.create_forum_topic = AsyncMock(
+            side_effect=Exception("Bad Request: The chat is not a forum")
+        )
+        runner = _make_runner(tmp_path, bot=bot)
+
+        event = _make_event(text="/thread research", chat_type="group")
+        result = await runner._handle_thread_command(event)
+        assert "doesn't support forum topics" in result
+        assert "group settings" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_create_not_a_forum_error_dm(self, tmp_path):
+        """/thread in a DM without topics enabled shows DM-specific guidance."""
+        bot = _make_mock_bot()
+        bot.create_forum_topic = AsyncMock(
+            side_effect=Exception("Bad Request: The chat is not a forum")
+        )
+        runner = _make_runner(tmp_path, bot=bot)
+
+        event = _make_event(text="/thread research", chat_type="dm")
+        result = await runner._handle_thread_command(event)
+        assert "premium" in result.lower()
+        assert "topics" in result.lower()
+
+    @pytest.mark.asyncio
     async def test_threads_isolated_per_chat(self, tmp_path):
         """Threads in different chats are independent."""
         bot = _make_mock_bot()

@@ -4988,11 +4988,20 @@ class GatewayRunner:
                     "The bot doesn't have permission to manage topics in this chat. "
                     "Make sure the bot is an admin with 'Manage Topics' permission."
                 )
-            if "topics" in error_msg and ("not found" in error_msg or "supergroup" in error_msg):
+            if (
+                ("topics" in error_msg and ("not found" in error_msg or "supergroup" in error_msg))
+                or "not a forum" in error_msg
+            ):
+                is_dm = event.source.chat_type == "dm"
+                if is_dm:
+                    return (
+                        "This DM doesn't have topics enabled. "
+                        "The user needs Telegram Premium and must enable "
+                        "Topics in this chat (tap bot name → Topics)."
+                    )
                 return (
                     "This chat doesn't support forum topics. "
-                    "For groups, enable topics in settings. "
-                    "For DMs, ensure the bot server supports Bot API 9.4+."
+                    "Enable Topics in the group settings (the group must be a supergroup)."
                 )
             return f"Failed to create forum topic: {e}"
 

@@ -122,6 +122,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         is_aggregator=True,
         base_url_env_var="HF_BASE_URL",
     ),
+    "bedrock": HermesOverlay(
+        transport="bedrock_converse",
+        extra_env_vars=("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"),
+        base_url_env_var="AWS_BEDROCK_RUNTIME_ENDPOINT",
+    ),
 }
 
 
@@ -212,6 +217,11 @@ ALIASES: Dict[str, str] = {
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
 
+    # bedrock
+    "aws-bedrock": "bedrock",
+    "aws": "bedrock",
+    "amazon-bedrock": "bedrock",
+
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
@@ -242,6 +252,7 @@ TRANSPORT_TO_API_MODE: Dict[str, str] = {
     "openai_chat": "chat_completions",
     "anthropic_messages": "anthropic_messages",
     "codex_responses": "codex_responses",
+    "bedrock_converse": "bedrock_converse",
 }
 
 
@@ -386,6 +397,7 @@ LABELS: Dict[str, str] = {
     "opencode-go": "OpenCode Go",
     "kilo": "Kilo Gateway",
     "huggingface": "Hugging Face",
+    "bedrock": "AWS Bedrock",
     "local": "Local endpoint",
     "custom": "Custom endpoint",
     # Legacy Hermes IDs (point to same providers)

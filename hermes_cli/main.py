@@ -961,6 +961,7 @@ def select_provider_and_model(args=None):
         ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
         ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
+        ("bedrock", "AWS Bedrock (Claude, Nova, Llama — IAM/SigV4 auth)"),
     ]
 
     # Add user-defined custom providers from config.yaml
@@ -1035,6 +1036,8 @@ def select_provider_and_model(args=None):
         _model_flow_kimi(config, current_model)
     elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
+    elif selected_provider == "bedrock":
+        _model_flow_bedrock(config, current_model)
 
 
 def _prompt_provider_choice(choices):
@@ -2232,6 +2235,104 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         deactivate_provider()
 
         print(f"Default model set to: {selected} (via {pconfig.name})")
+    else:
+        print("No change.")
+
+
+def _model_flow_bedrock(config, current_model=""):
+    """Setup flow for AWS Bedrock — uses IAM/SigV4 auth, not API keys."""
+    import os
+    from hermes_cli.auth import (
+        _prompt_model_selection, _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    print()
+    print("  AWS Bedrock uses IAM credentials (SigV4 signing).")
+    print("  Credentials are resolved via the standard boto3 chain:")
+    print("    • Environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)")
+    print("    • AWS config/credentials files (~/.aws/)")
+    print("    • IAM instance role / ECS task role / SSO")
+    print()
+
+    # Check for existing AWS credentials
+    has_env_key = bool(os.getenv("AWS_ACCESS_KEY_ID", "") or get_env_value("AWS_ACCESS_KEY_ID"))
+    has_profile = bool(os.getenv("AWS_PROFILE", ""))
+    has_aws_dir = os.path.exists(os.path.expanduser("~/.aws/credentials"))
+
+    if has_env_key:
+        key_id = os.getenv("AWS_ACCESS_KEY_ID", "") or get_env_value("AWS_ACCESS_KEY_ID") or ""
+        print(f"  AWS credentials: {key_id[:8]}... ✓ (environment)")
+    elif has_profile:
+        print(f"  AWS profile: {os.getenv('AWS_PROFILE')} ✓")
+    elif has_aws_dir:
+        print("  AWS credentials file: ~/.aws/credentials ✓")
+    else:
+        print("  ⚠ No AWS credentials detected.")
+        print("  Configure credentials before using Bedrock (aws configure, env vars, or IAM role).")
+    print()
+
+    # Region / endpoint
+    current_region = os.getenv("AWS_REGION", "") or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    current_endpoint = (
+        get_env_value("AWS_BEDROCK_RUNTIME_ENDPOINT")
+        or os.getenv("AWS_BEDROCK_RUNTIME_ENDPOINT", "")
+    )
+    effective_endpoint = current_endpoint or f"https://bedrock-runtime.{current_region}.amazonaws.com"
+
+    try:
+        region_input = input(f"  AWS region [{current_region}]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    if region_input:
+        current_region = region_input
+        effective_endpoint = f"https://bedrock-runtime.{current_region}.amazonaws.com"
+
+    try:
+        endpoint_input = input(f"  Bedrock endpoint [{effective_endpoint}]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        endpoint_input = ""
+    if endpoint_input:
+        effective_endpoint = endpoint_input.rstrip("/")
+
+    if effective_endpoint != (current_endpoint or ""):
+        save_env_value("AWS_BEDROCK_RUNTIME_ENDPOINT", effective_endpoint)
+
+    print()
+
+    # Model selection
+    model_list = _PROVIDER_MODELS.get("bedrock", [])
+    if model_list:
+        print(f"  Showing {len(model_list)} curated Bedrock models — use \"Enter custom model name\" for others.")
+        selected = _prompt_model_selection(model_list, current_model=current_model)
+    else:
+        try:
+            selected = input("  Model name (e.g., bedrock/claude-sonnet-4): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if selected:
+        if not selected.startswith("bedrock/"):
+            selected = f"bedrock/{selected}"
+
+        _save_model_choice(selected)
+
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = "bedrock"
+        model["base_url"] = effective_endpoint
+        model["api_mode"] = "bedrock_converse"
+        save_config(cfg)
+        deactivate_provider()
+
+        print(f"Default model set to: {selected} (via AWS Bedrock)")
     else:
         print("No change.")
 

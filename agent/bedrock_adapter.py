@@ -28,7 +28,8 @@ BEDROCK_MODEL_METADATA: Dict[str, Dict[str, int]] = {
     "anthropic.claude-3-opus-20240229-v1:0": {"context_length": 200000, "max_output_tokens": 4096},
     "anthropic.claude-3-sonnet-20240229-v1:0": {"context_length": 200000, "max_output_tokens": 4096},
     "anthropic.claude-3-haiku-20240307-v1:0": {"context_length": 200000, "max_output_tokens": 4096},
-    # Claude 4 / Sonnet 4 / Opus 4 (cross-region)
+    # Claude 4 / Sonnet 4 / Opus 4 / Opus 4.6 (cross-region)
+    "us.anthropic.claude-opus-4-6-v1": {"context_length": 200000, "max_output_tokens": 16384},
     "us.anthropic.claude-sonnet-4-20250514-v1:0": {"context_length": 200000, "max_output_tokens": 16384},
     "us.anthropic.claude-opus-4-20250514-v1:0": {"context_length": 200000, "max_output_tokens": 16384},
     "eu.anthropic.claude-sonnet-4-20250514-v1:0": {"context_length": 200000, "max_output_tokens": 16384},
@@ -49,6 +50,7 @@ BEDROCK_MODEL_METADATA: Dict[str, Dict[str, int]] = {
 # ---------------------------------------------------------------------------
 
 BEDROCK_MODEL_ALIASES: Dict[str, str] = {
+    "claude-opus-4.6": "us.anthropic.claude-opus-4-6-v1",
     "claude-sonnet-4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
     "claude-opus-4": "us.anthropic.claude-opus-4-20250514-v1:0",
     "claude-3.5-sonnet": "anthropic.claude-3-5-sonnet-20241022-v2:0",
@@ -60,6 +62,19 @@ BEDROCK_MODEL_ALIASES: Dict[str, str] = {
     "llama3.1-405b": "meta.llama3-1-405b-instruct-v1:0",
     "llama3.1-70b": "meta.llama3-1-70b-instruct-v1:0",
     "mistral-large": "mistral.mistral-large-2407-v1:0",
+}
+
+
+# ---------------------------------------------------------------------------
+# Effort → budget_tokens mapping for extended thinking
+# ---------------------------------------------------------------------------
+
+_BEDROCK_THINKING_BUDGET: Dict[str, int] = {
+    "xhigh": 32000,
+    "high": 16000,
+    "medium": 8000,
+    "low": 4000,
+    "minimal": 2000,
 }
 
 
@@ -558,13 +573,16 @@ def build_bedrock_kwargs(
     if bedrock_tools:
         kwargs["toolConfig"] = {"tools": bedrock_tools}
 
-    # Add reasoning/thinking config if provided and explicitly requested.
-    # Only enable Bedrock extended thinking when budget_tokens is explicitly set.
-    # OpenRouter-style reasoning configs ({"enabled": True, "effort": "medium"})
-    # are NOT translated to Bedrock thinking — they control a different mechanism.
+    # Add reasoning/thinking config if provided.
+    # Supports both explicit budget_tokens and effort-based configs.
+    # Effort levels are mapped to budget_tokens for Bedrock's Converse API
+    # (adaptive thinking is not yet supported by Converse).
     if reasoning_config and isinstance(reasoning_config, dict):
-        budget_tokens = reasoning_config.get("budget_tokens")
-        if budget_tokens and isinstance(budget_tokens, int) and budget_tokens > 0:
+        if reasoning_config.get("enabled") is not False:
+            budget_tokens = reasoning_config.get("budget_tokens")
+            if not (budget_tokens and isinstance(budget_tokens, int) and budget_tokens > 0):
+                effort = str(reasoning_config.get("effort", "medium")).lower()
+                budget_tokens = _BEDROCK_THINKING_BUDGET.get(effort, 8000)
             kwargs["additionalModelRequestFields"] = {
                 "thinking": {
                     "type": "enabled",
