@@ -160,6 +160,8 @@ def _discover_tools():
         "tools.homeassistant_tool",
         "tools.a2a_tool",
         "tools.arp_tool",
+        "tools.acp_tool",
+        "tools.workspace_dispatch",
     ]
     import importlib
     for mod_name in _modules:

@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Workspace dispatch (gated on awesometree daemon via check_fn)
+    "workspace_dispatch", "workspace_poll",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -66,6 +68,8 @@ _HERMES_CORE_TOOLS = [
     "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
     # ARP (Agent Registry Protocol) client
     "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
+    # ACP remote agent invocation (gated on acp.servers config via check_fn)
+    "acp_list_agents", "acp_run_agent", "acp_resume_run", "acp_manage_servers",
 ]
 
 
@@ -219,6 +223,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "acp": {
+        "description": "ACP remote agent invocation — discover and call agents on remote ACP servers",
+        "tools": ["acp_list_agents", "acp_run_agent", "acp_resume_run", "acp_manage_servers"],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     
@@ -260,6 +270,9 @@ TOOLSETS = {
             "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
             # ARP protocol client
             "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
+            # ACP remote agent invocation + workspace orchestration
+            "acp_list_agents", "acp_run_agent", "acp_resume_run", "acp_manage_servers",
+            "workspace_dispatch", "workspace_poll",
         ],
         "includes": []
     },
@@ -298,7 +311,9 @@ TOOLSETS = {
             "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
             # ARP protocol client
             "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
-
+            # ACP remote agent invocation (gated on acp.servers config via check_fn)
+            "acp_list_agents", "acp_run_agent", "acp_resume_run", "acp_manage_servers",
+            "workspace_dispatch", "workspace_poll",
         ],
         "includes": []
     },
