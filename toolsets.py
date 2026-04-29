@@ -65,7 +65,7 @@ _HERMES_CORE_TOOLS = [
     # A2A (Agent-to-Agent) protocol client
     "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
     # ARP (Agent Registry Protocol) client
-    "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
+    "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
 ]
 
 
@@ -215,7 +215,7 @@ TOOLSETS = {
 
     "arp": {
         "description": "Agent Registry Protocol (ARP) client — discover, message, and route to A2A agents managed by an ARP server",
-        "tools": ["arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces"],
+        "tools": ["arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage"],
         "includes": []
     },
 
@@ -259,7 +259,7 @@ TOOLSETS = {
             # A2A protocol client
             "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
             # ARP protocol client
-            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
+            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
         ],
         "includes": []
     },
@@ -297,7 +297,7 @@ TOOLSETS = {
             # A2A protocol client
             "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
             # ARP protocol client
-            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
+            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces", "arp_manage",
 
         ],
         "includes": []
