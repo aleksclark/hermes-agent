@@ -62,6 +62,10 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # A2A (Agent-to-Agent) protocol client
+    "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
+    # ARP (Agent Registry Protocol) client
+    "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
 ]
 
 
@@ -203,6 +207,18 @@ TOOLSETS = {
         "includes": []
     },
 
+    "a2a": {
+        "description": "Agent-to-Agent (A2A) protocol client — discover, message, and manage tasks on remote A2A agents",
+        "tools": ["a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task"],
+        "includes": []
+    },
+
+    "arp": {
+        "description": "Agent Registry Protocol (ARP) client — discover, message, and route to A2A agents managed by an ARP server",
+        "tools": ["arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces"],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     
@@ -240,6 +256,10 @@ TOOLSETS = {
             "todo", "memory",
             "session_search",
             "execute_code", "delegate_task",
+            # A2A protocol client
+            "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
+            # ARP protocol client
+            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
         ],
         "includes": []
     },
@@ -274,6 +294,10 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+            # A2A protocol client
+            "a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel_task",
+            # ARP protocol client
+            "arp_list_agents", "arp_get_agent_card", "arp_send_message", "arp_route_message", "arp_list_workspaces",
 
         ],
         "includes": []
