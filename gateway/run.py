@@ -5006,6 +5006,24 @@ class GatewayRunner:
             return f"Failed to create forum topic: {e}"
 
         self._thread_store.add(chat_id, name, topic_id)
+
+        # Register in the Telegram adapter's DM topics cache so incoming
+        # messages are properly routed with topic name context.
+        if hasattr(adapter, "_dm_topics"):
+            cache_key = f"{chat_id}:{name}"
+            adapter._dm_topics[cache_key] = topic_id
+
+        # Send an initial message INTO the new topic so the user sees it
+        # and so the thread is "active" for receiving replies.
+        try:
+            await adapter.send(
+                chat_id=chat_id,
+                content=f"\U0001f9f5 Thread **{name}** is ready. Messages here have their own conversation.",
+                metadata={"thread_id": str(topic_id)},
+            )
+        except Exception as e:
+            logger.warning("Failed to send initial message to new topic %s: %s", name, e)
+
         return (
             f"\U0001f9f5 Forum topic **{name}** created! "
             f"Reply in the new topic to start chatting."
