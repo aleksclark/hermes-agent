@@ -8,32 +8,41 @@ with the TUI.
 
 import queue
 import time as _time
-import getpass
 
 from hermes_cli.banner import cprint, _DIM, _RST
 from hermes_cli.config import save_env_value_secure
+from hermes_cli.secret_prompt import masked_secret_prompt
 from hermes_constants import display_hermes_home
 
 
-def clarify_callback(cli, question, choices):
+def clarify_callback(cli, question, choices, multi_select=False):
     """Prompt for clarifying question through the TUI.
 
     Sets up the interactive selection UI, then blocks until the user
     responds. Returns the user's choice or a timeout message.
+
+    When ``multi_select`` is True, shows checkboxes and the user can
+    select multiple options with Space, confirming with Enter.
     """
     from cli import CLI_CONFIG
+    from tools.clarify_gateway import resolve_clarify_timeout
 
-    timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 120)
+    # Canonical clarify timeout, shared with the gateway/TUI path. `<= 0`
+    # means unlimited (never auto-skip mid-think) → a null deadline.
+    timeout = resolve_clarify_timeout(CLI_CONFIG)
     response_queue = queue.Queue()
-    is_open_ended = not choices or len(choices) == 0
+    is_open_ended = not choices
+    effective_multi = multi_select and not is_open_ended
 
     cli._clarify_state = {
         "question": question,
         "choices": choices if not is_open_ended else [],
         "selected": 0,
+        "multi_select": effective_multi,
+        "selected_indices": set() if effective_multi else None,
         "response_queue": response_queue,
     }
-    cli._clarify_deadline = _time.monotonic() + timeout
+    cli._clarify_deadline = None if timeout <= 0 else _time.monotonic() + timeout
     cli._clarify_freetext = is_open_ended
 
     if hasattr(cli, "_app") and cli._app:
@@ -42,18 +51,20 @@ def clarify_callback(cli, question, choices):
     while True:
         try:
             result = response_queue.get(timeout=1)
-            cli._clarify_deadline = 0
+            cli._clarify_deadline = None
             return result
         except queue.Empty:
-            remaining = cli._clarify_deadline - _time.monotonic()
-            if remaining <= 0:
-                break
+            # None deadline = unlimited: never auto-skip, just keep polling.
+            if cli._clarify_deadline is not None:
+                remaining = cli._clarify_deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
             if hasattr(cli, "_app") and cli._app:
                 cli._app.invalidate()
 
     cli._clarify_state = None
     cli._clarify_freetext = False
-    cli._clarify_deadline = 0
+    cli._clarify_deadline = None
     if hasattr(cli, "_app") and cli._app:
         cli._app.invalidate()
     cprint(f"\n{_DIM}(clarify timed out after {timeout}s — agent will decide){_RST}")
@@ -61,47 +72,6 @@ def clarify_callback(cli, question, choices):
         "The user did not provide a response within the time limit. "
         "Use your best judgement to make the choice and proceed."
     )
-
-
-def sudo_password_callback(cli) -> str:
-    """Prompt for sudo password through the TUI.
-
-    Sets up a password input area and blocks until the user responds.
-    """
-    timeout = 45
-    response_queue = queue.Queue()
-
-    cli._sudo_state = {"response_queue": response_queue}
-    cli._sudo_deadline = _time.monotonic() + timeout
-
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
-
-    while True:
-        try:
-            result = response_queue.get(timeout=1)
-            cli._sudo_state = None
-            cli._sudo_deadline = 0
-            if hasattr(cli, "_app") and cli._app:
-                cli._app.invalidate()
-            if result:
-                cprint(f"\n{_DIM}  ✓ Password received (cached for session){_RST}")
-            else:
-                cprint(f"\n{_DIM}  ⏭ Skipped{_RST}")
-            return result
-        except queue.Empty:
-            remaining = cli._sudo_deadline - _time.monotonic()
-            if remaining <= 0:
-                break
-            if hasattr(cli, "_app") and cli._app:
-                cli._app.invalidate()
-
-    cli._sudo_state = None
-    cli._sudo_deadline = 0
-    if hasattr(cli, "_app") and cli._app:
-        cli._app.invalidate()
-    cprint(f"\n{_DIM}  ⏱ Timeout — continuing without sudo{_RST}")
-    return ""
 
 
 def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
@@ -116,12 +86,12 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
         if not hasattr(cli, "_secret_deadline"):
             cli._secret_deadline = 0
         try:
-            value = getpass.getpass(f"{prompt} (hidden, Enter to skip): ")
+            value = masked_secret_prompt(f"{prompt} (hidden, ESC or empty Enter to skip): ")
         except (EOFError, KeyboardInterrupt):
             value = ""
 
         if not value:
-            cprint(f"\n{_DIM}  ⏭ Secret entry cancelled{_RST}")
+            cprint(f"\n{_DIM}  ⏭ Secret entry skipped{_RST}")
             return {
                 "success": True,
                 "reason": "cancelled",
@@ -174,7 +144,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
                 cli._app.invalidate()
 
             if not value:
-                cprint(f"\n{_DIM}  ⏭ Secret entry cancelled{_RST}")
+                cprint(f"\n{_DIM}  ⏭ Secret entry skipped{_RST}")
                 return {
                     "success": True,
                     "reason": "cancelled",
@@ -242,7 +212,7 @@ def approval_callback(cli, command: str, description: str) -> str:
 
     with lock:
         from cli import CLI_CONFIG
-        timeout = CLI_CONFIG.get("approvals", {}).get("timeout", 60)
+        timeout = CLI_CONFIG.get("approvals", {}).get("timeout", 300)
         response_queue = queue.Queue()
         choices = ["once", "session", "always", "deny"]
         if len(command) > 70:
