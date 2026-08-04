@@ -127,6 +127,48 @@ class TestBuildAnthropicClient:
             kwargs = mock_sdk.Anthropic.call_args[1]
             assert kwargs["max_retries"] == 0
 
+    def test_configured_provider_headers_reach_the_messages_transport(self):
+        """Gateway headers configured for a provider must apply on this transport too.
+
+        Endpoints behind an AI gateway need attribution/logging headers on every
+        request. They already reach OpenAI-wire clients, so dropping them here
+        would make the same provider behave differently per transport.
+        """
+        gateway_url = "https://gateway.example.com/v1/acct/gw/anthropic"
+        config = {
+            "providers": {
+                "gw": {
+                    "api": gateway_url,
+                    "extra_headers": {
+                        "cf-aig-metadata": '{"tool": "hermes"}',
+                        "cf-aig-collect-log-payload": "false",
+                    },
+                }
+            }
+        }
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk, patch(
+            "hermes_cli.config.load_config", return_value=config
+        ):
+            build_anthropic_client("gateway-secret", base_url=gateway_url)
+            headers = mock_sdk.Anthropic.call_args[1]["default_headers"]
+
+        assert headers["cf-aig-metadata"] == '{"tool": "hermes"}'
+        assert headers["cf-aig-collect-log-payload"] == "false"
+        # Endpoint-derived defaults must survive the merge.
+        assert "anthropic-beta" in headers
+
+    def test_unconfigured_endpoint_keeps_default_headers_only(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk, patch(
+            "hermes_cli.config.load_config", return_value={"providers": {}}
+        ):
+            build_anthropic_client(
+                "gateway-secret",
+                base_url="https://gateway.example.com/v1/acct/gw/anthropic",
+            )
+            headers = mock_sdk.Anthropic.call_args[1]["default_headers"]
+
+        assert set(headers) == {"anthropic-beta"}
+
 
 
 

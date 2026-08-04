@@ -682,6 +682,29 @@ def _common_betas_for_base_url(
     return betas
 
 
+def _configured_extra_headers_for_base_url(base_url: str | None) -> dict:
+    """Return user-configured per-provider headers for an Anthropic endpoint.
+
+    Endpoints reached through a gateway frequently need extra request headers
+    (attribution metadata, logging opt-outs, proxy auth). Those already flow to
+    OpenAI-wire clients from ``providers.<name>.extra_headers``; resolving them
+    here keeps the Anthropic Messages transport at parity, so switching a
+    provider between transports does not silently drop its headers.
+
+    SECURITY: values may carry credentials — never log them.
+    """
+    normalized = _normalize_base_url_text(base_url)
+    if not normalized:
+        return {}
+    try:
+        from hermes_cli.config import get_custom_provider_extra_headers
+
+        return dict(get_custom_provider_extra_headers(normalized))
+    except Exception:
+        logger.debug("custom-provider extra_headers lookup skipped", exc_info=True)
+        return {}
+
+
 def _build_anthropic_client_with_bearer_hook(
     token_provider,
     base_url: str = None,
@@ -754,6 +777,13 @@ def _build_anthropic_client_with_bearer_hook(
     )
     if common_betas:
         kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+
+    configured_headers = _configured_extra_headers_for_base_url(normalized_base_url)
+    if configured_headers:
+        kwargs["default_headers"] = {
+            **dict(kwargs.get("default_headers") or {}),
+            **configured_headers,
+        }
 
     client = _anthropic_sdk.Anthropic(**kwargs)
     # Same env-inference trap as build_anthropic_client: auth_token-only
@@ -887,6 +917,15 @@ def build_anthropic_client(
         kwargs["api_key"] = api_key
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+
+    # User-configured provider headers are the most specific level, so they are
+    # merged last and win over the defaults chosen above.
+    configured_headers = _configured_extra_headers_for_base_url(normalized_base_url)
+    if configured_headers:
+        kwargs["default_headers"] = {
+            **dict(kwargs.get("default_headers") or {}),
+            **configured_headers,
+        }
 
     client = _anthropic_sdk.Anthropic(**kwargs)
     # Bearer-only construction leaves ``api_key`` unset, so the SDK fills it

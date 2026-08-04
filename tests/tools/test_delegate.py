@@ -816,6 +816,174 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         self.assertIn("Cannot resolve", result["error"])
         self.assertIn("nonexistent", result["error"])
 
+
+class TestPerCallModelSelection(unittest.TestCase):
+    """Per-call model/provider on delegate_task (top-level + per-task)."""
+
+    def test_schema_exposes_model_and_provider(self):
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        self.assertIn("model", props)
+        self.assertIn("provider", props)
+        task_props = props["tasks"]["items"]["properties"]
+        self.assertIn("model", task_props)
+        self.assertIn("provider", task_props)
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_call_site_provider_beats_config_base_url(self, mock_resolve):
+        """Call-site provider must not inherit a global delegation.base_url pin."""
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "model": "google/gemini-3-flash-preview",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-call",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "local-model",
+            "base_url": "http://localhost:1234/v1",
+            "api_key": "local-key",
+        }
+        creds = _resolve_delegation_credentials(
+            cfg,
+            parent,
+            model_override="google/gemini-3-flash-preview",
+            provider_override="openrouter",
+        )
+        self.assertEqual(creds["provider"], "openrouter")
+        self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(creds["api_key"], "sk-or-call")
+        mock_resolve.assert_called_once_with(
+            requested="openrouter",
+            target_model="google/gemini-3-flash-preview",
+        )
+
+    def test_model_only_override_keeps_parent_credentials(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {}
+        creds = _resolve_delegation_credentials(
+            cfg, parent, model_override="anthropic/claude-opus-4-6"
+        )
+        self.assertEqual(creds["model"], "anthropic/claude-opus-4-6")
+        self.assertIsNone(creds["provider"])
+        self.assertIsNone(creds["base_url"])
+        self.assertIsNone(creds["api_key"])
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_top_level_model_provider_reach_child(self, mock_creds, mock_cfg):
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.side_effect = [
+            # default config resolve (no call-site on config alone)
+            {
+                "model": None,
+                "provider": None,
+                "base_url": None,
+                "api_key": None,
+                "api_mode": None,
+            },
+            # per-call re-resolve
+            {
+                "model": "gpt-5.6",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-or",
+                "api_mode": "chat_completions",
+            },
+        ]
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                goal="Use a cheaper model",
+                model="gpt-5.6",
+                provider="openrouter",
+                parent_agent=parent,
+            )
+
+            self.assertEqual(mock_creds.call_count, 2)
+            second_call = mock_creds.call_args_list[1]
+            self.assertEqual(second_call.kwargs.get("model_override"), "gpt-5.6")
+            self.assertEqual(second_call.kwargs.get("provider_override"), "openrouter")
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "gpt-5.6")
+            self.assertEqual(kwargs["provider"], "openrouter")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_model_beats_top_level(self, mock_creds, mock_cfg):
+        mock_cfg.return_value = {"max_iterations": 45}
+        default = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        mock_creds.side_effect = [
+            default,
+            {
+                "model": "task-a-model",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-a",
+                "api_mode": "chat_completions",
+            },
+            {
+                "model": "task-b-model",
+                "provider": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "sk-b",
+                "api_mode": "anthropic_messages",
+            },
+        ]
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(
+                tasks=[
+                    {"goal": "A", "model": "task-a-model", "provider": "openrouter"},
+                    {"goal": "B", "model": "task-b-model", "provider": "anthropic"},
+                ],
+                model="top-level-ignored",
+                provider="openrouter",
+                parent_agent=parent,
+            )
+
+            self.assertEqual(MockAgent.call_count, 2)
+            models = [c.kwargs["model"] for c in MockAgent.call_args_list]
+            providers = [c.kwargs["provider"] for c in MockAgent.call_args_list]
+            self.assertEqual(models, ["task-a-model", "task-b-model"])
+            self.assertEqual(providers, ["openrouter", "anthropic"])
+            # Per-task overrides were passed through resolve
+            overrides = [
+                (c.kwargs.get("model_override"), c.kwargs.get("provider_override"))
+                for c in mock_creds.call_args_list[1:]
+            ]
+            self.assertEqual(
+                overrides,
+                [
+                    ("task-a-model", "openrouter"),
+                    ("task-b-model", "anthropic"),
+                ],
+            )
+
 class TestChildCredentialPoolResolution(unittest.TestCase):
     def test_same_provider_shares_parent_pool(self):
         parent = _make_mock_parent()

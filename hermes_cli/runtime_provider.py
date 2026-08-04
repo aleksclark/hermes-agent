@@ -121,9 +121,12 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     """
     normalized = (base_url or "").strip().lower().rstrip("/")
     hostname = base_url_hostname(base_url)
+    path = urlparse(normalized).path.rstrip("/")
     if hostname == "api.x.ai":
         return "codex_responses"
     if hostname == "api.openai.com":
+        return "codex_responses"
+    if hostname == "gateway.ai.cloudflare.com" and path.endswith("/openai"):
         return "codex_responses"
     # Direct native Anthropic host: realign with providers.determine_api_mode,
     # which already maps this host to anthropic_messages. The exact-hostname
@@ -131,7 +134,6 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     # path-segment spoofing (proxy.test/api.anthropic.com/v1). (#32243)
     if hostname == "api.anthropic.com":
         return "anthropic_messages"
-    path = urlparse(normalized).path.rstrip("/")
     if path.endswith("/anthropic") or path.endswith("/anthropic/v1"):
         return "anthropic_messages"
     if hostname == "api.kimi.com" and "/coding" in normalized:

@@ -30,6 +30,24 @@ def test_configured_api_key_provider_without_key_fails_closed(monkeypatch):
         rp.resolve_runtime_provider()
 
 
+def test_cloudflare_openai_gateway_uses_responses_transport():
+    assert rp._detect_api_mode_for_url(
+        "https://gateway.ai.cloudflare.com/v1/account/gateway/openai"
+    ) == "codex_responses"
+
+
+def test_cloudflare_compat_gateway_stays_chat_completions():
+    assert rp._detect_api_mode_for_url(
+        "https://gateway.ai.cloudflare.com/v1/account/gateway/compat"
+    ) is None
+
+
+def test_cloudflare_lookalike_host_is_not_detected():
+    assert rp._detect_api_mode_for_url(
+        "https://gateway.ai.cloudflare.com.attacker.test/v1/account/gateway/openai"
+    ) is None
+
+
 def test_noauth_lmstudio_still_resolves(monkeypatch):
     """The fail-closed key guard preserves LM Studio's no-auth contract."""
     monkeypatch.setattr(rp, "load_pool", lambda _provider: SimpleNamespace(has_credentials=lambda: False))

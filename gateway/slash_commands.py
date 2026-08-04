@@ -1668,6 +1668,45 @@ class GatewaySlashCommandsMixin:
             getattr(getattr(event, "source", None), "platform", None),
         )
 
+    async def _update_telegram_thread_model_pin(
+        self,
+        source: SessionSource,
+        *,
+        model: str,
+        provider: str = "",
+    ) -> None:
+        """Best-effort update of the pinned model banner for a Telegram topic.
+
+        Session keys already include ``thread_id`` for forum/DM topics, so a
+        ``/model`` switch is thread-scoped. Keep the topic's pinned banner in
+        sync so the active model is visible without scrolling history.
+        """
+        if getattr(source, "platform", None) != Platform.TELEGRAM:
+            return
+        adapter = getattr(self, "_adapter_for_source", lambda _s: None)(source)
+        if adapter is None:
+            return
+        pin_fn = getattr(adapter, "upsert_thread_model_pin", None)
+        if not callable(pin_fn):
+            return
+        chat_id = getattr(source, "chat_id", None)
+        if not chat_id:
+            return
+        try:
+            await pin_fn(
+                str(chat_id),
+                model=str(model or ""),
+                provider=str(provider or ""),
+                thread_id=getattr(source, "thread_id", None),
+            )
+        except Exception:
+            logger.debug(
+                "Failed to update Telegram thread model pin for chat=%s thread=%s",
+                chat_id,
+                getattr(source, "thread_id", None),
+                exc_info=True,
+            )
+
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model.
 
@@ -2052,6 +2091,11 @@ class GatewaySlashCommandsMixin:
                             lines.append(t("gateway.model.saved_global"))
                         else:
                             lines.append(t("gateway.model.session_only_hint"))
+                        await _self._update_telegram_thread_model_pin(
+                            source,
+                            model=format_model_for_display(result.new_model),
+                            provider=plabel,
+                        )
                         return "\n".join(lines)
 
                     async def _on_model_selected(
@@ -2387,6 +2431,11 @@ class GatewaySlashCommandsMixin:
             else:
                 lines.append(t("gateway.model.session_only_hint"))
 
+            await self._update_telegram_thread_model_pin(
+                source,
+                model=format_model_for_display(result.new_model),
+                provider=provider_label,
+            )
             return "\n".join(lines)
 
         # Expensive-model confirmation gate (typed /model <name> path).

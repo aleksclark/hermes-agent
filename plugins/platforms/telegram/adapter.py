@@ -848,6 +848,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # Tracks status bubbles owned by this adapter so subsequent calls with the
         # same key edit the same message instead of appending new ones (#30045).
         self._status_message_ids: Dict[tuple, str] = {}
+        # Pinned per-thread model banner: {(chat_id, thread_id_or_"") -> message_id}.
+        # Updated in place on /model so the topic always shows the active model.
+        self._thread_model_pin_ids: Dict[tuple, str] = {}
         # Last truncated mid-stream preview delivered per (chat_id, message_id).
         # Once an oversized streaming edit saturates at the 4096 preview cap,
         # every subsequent progressive edit truncates to the SAME text; sending
@@ -4678,6 +4681,81 @@ class TelegramAdapter(BasePlatformAdapter):
         if result.success and result.message_id:
             self._status_message_ids[key] = str(result.message_id)
         return result
+
+    async def upsert_thread_model_pin(
+        self,
+        chat_id: str,
+        *,
+        model: str,
+        provider: str = "",
+        thread_id: Optional[str] = None,
+        disable_notification: bool = True,
+    ) -> Optional[str]:
+        """Create or update a pinned banner showing the thread's active model.
+
+        Telegram forum topics and DM topics are independent sessions; pinning a
+        short model label in the topic keeps the active model visible without
+        relying on chat history. Edits the previous pin in place when possible;
+        otherwise sends a fresh message and pins it.
+        """
+        if not self._bot:
+            return None
+        model_label = str(model or "").strip()
+        if not model_label:
+            return None
+        provider_label = str(provider or "").strip()
+        text = f"🤖 Model: {model_label}"
+        if provider_label:
+            text += f"\nProvider: {provider_label}"
+
+        chat_key = str(chat_id)
+        thread_key = str(thread_id).strip() if thread_id not in (None, "") else ""
+        cache_key = (chat_key, thread_key)
+        metadata = {"thread_id": thread_key} if thread_key else None
+
+        cached_id = self._thread_model_pin_ids.get(cache_key)
+        if cached_id is not None:
+            edit_result = await self.edit_message(
+                chat_key, cached_id, text, finalize=True, metadata=metadata,
+            )
+            if edit_result.success:
+                if edit_result.message_id:
+                    self._thread_model_pin_ids[cache_key] = str(edit_result.message_id)
+                # Re-pin in case the user unpinned the banner.
+                try:
+                    pin_kwargs: Dict[str, Any] = {
+                        "chat_id": normalize_telegram_chat_id(chat_key),
+                        "message_id": int(self._thread_model_pin_ids[cache_key]),
+                        "disable_notification": disable_notification,
+                    }
+                    await self._bot.pin_chat_message(**pin_kwargs)
+                except Exception as pin_err:
+                    logger.debug(
+                        "[%s] Could not re-pin model banner in chat=%s thread=%s: %s",
+                        self.name, chat_key, thread_key or "-", pin_err,
+                    )
+                return self._thread_model_pin_ids[cache_key]
+            self._thread_model_pin_ids.pop(cache_key, None)
+
+        send_result = await self.send(chat_key, text, metadata=metadata)
+        if not (send_result.success and send_result.message_id):
+            return None
+        message_id = str(send_result.message_id)
+        self._thread_model_pin_ids[cache_key] = message_id
+        try:
+            pin_kwargs = {
+                "chat_id": normalize_telegram_chat_id(chat_key),
+                "message_id": int(message_id),
+                "disable_notification": disable_notification,
+            }
+            await self._bot.pin_chat_message(**pin_kwargs)
+        except Exception as pin_err:
+            # Keep the message even if pin fails (missing admin rights, etc.).
+            logger.debug(
+                "[%s] Could not pin model banner in chat=%s thread=%s: %s",
+                self.name, chat_key, thread_key or "-", pin_err,
+            )
+        return message_id
 
     async def edit_message(
         self,

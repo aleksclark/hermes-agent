@@ -2782,19 +2782,27 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context and role)
-      - Batch:  provide tasks array [{goal, context, role}, ...]
+      - Single: provide goal (+ optional context, role, model, provider)
+      - Batch:  provide tasks array
+        [{goal, context, role, model, provider}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    Optional ``model`` / ``provider`` select the child route per call.
+    Per-task values beat top-level values, which beat
+    ``delegation.model`` / ``delegation.provider`` in config, which beat
+    parent inheritance.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2812,6 +2820,8 @@ def delegate_task(
 
     # Normalise the top-level role once; per-task overrides re-normalise.
     top_role = _normalize_role(role)
+    top_model = str(model or "").strip() or None
+    top_provider = str(provider or "").strip() or None
 
     # Background (async) delegation now applies to BOTH single tasks and
     # batches. A batch is dispatched as ONE async unit: the whole fan-out runs
@@ -2851,13 +2861,11 @@ def delegate_task(
         )
     effective_max_iter = default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
+    # Resolve default delegation credentials (config provider:model pair).
+    # Call-site / per-task model+provider overrides re-resolve below.
+    # When unconfigured, returns None values so children inherit from parent.
     try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
+        default_creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
 
@@ -2880,7 +2888,13 @@ def delegate_task(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "role": top_role}]
+        task_list = [{
+            "goal": goal,
+            "context": context,
+            "role": top_role,
+            "model": top_model,
+            "provider": top_provider,
+        }]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -2936,10 +2950,26 @@ def delegate_task(
     # toolset resolution never leaks into the parent (shared with the plugin
     # subagent-lifecycle API).
     children = []
+    child_models: List[Optional[str]] = []
     for i, t in enumerate(task_list):
-        # Per-task role beats top-level; normalise again so unknown
-        # per-task values warn and degrade to leaf uniformly.
+        # Per-task role/model/provider beat top-level; normalise role again so
+        # unknown per-task values warn and degrade to leaf uniformly.
         effective_role = _normalize_role(t.get("role") or top_role)
+        task_model = str(t.get("model") or top_model or "").strip() or None
+        task_provider = str(t.get("provider") or top_provider or "").strip() or None
+        if task_model or task_provider:
+            try:
+                creds = _resolve_delegation_credentials(
+                    cfg,
+                    parent_agent,
+                    model_override=task_model,
+                    provider_override=task_provider,
+                )
+            except ValueError as exc:
+                return tool_error(str(exc))
+        else:
+            creds = default_creds
+        child_models.append(creds.get("model"))
         child = _build_child_preserving_parent_tools(
             task_index=i,
             goal=t["goal"],
@@ -3315,6 +3345,15 @@ def delegate_task(
             return tuple(parts), in_tool
 
         _goals = [t["goal"] for t in task_list]
+        # Completion metadata only — children already built with per-task
+        # routes. Prefer a single label when the batch is homogeneous.
+        _unique_models = {m for m in child_models if m}
+        if len(_unique_models) == 1:
+            _batch_model_label = next(iter(_unique_models))
+        elif _unique_models:
+            _batch_model_label = "mixed"
+        else:
+            _batch_model_label = default_creds.get("model")
         dispatch = dispatch_async_delegation_batch(
             goals=_goals,
             context=context,
@@ -3322,7 +3361,7 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=_batch_model_label,
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -3476,27 +3515,55 @@ def _resolve_child_credential_pool(
     return None
 
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
+def _resolve_delegation_credentials(
+    cfg: dict,
+    parent_agent,
+    *,
+    model_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
+) -> dict:
     """Resolve credentials for subagent delegation.
 
-    If ``delegation.base_url`` is configured, subagents use that direct
-    OpenAI-compatible endpoint. ``delegation.api_key`` overrides the key; when
-    omitted, ``api_key`` is returned as ``None`` so ``_build_child_agent``
-    inherits the parent agent's key (``effective_api_key = override_api_key or
-    parent_api_key``). This lets providers that store their key outside
-    ``OPENAI_API_KEY`` (e.g. ``MINIMAX_API_KEY``, ``DASHSCOPE_API_KEY``) work
-    without a duplicate config entry.
+    Precedence for model/provider:
+      1. Call-site overrides (``model_override`` / ``provider_override`` from
+         ``delegate_task`` top-level or per-task fields)
+      2. ``delegation.*`` config
+      3. Parent agent inheritance (when provider/base_url resolve to None)
 
-    Otherwise, if ``delegation.provider`` is configured, the full credential
-    bundle (base_url, api_key, api_mode, provider) is resolved via the runtime
-    provider system — the same path used by CLI/gateway startup. This lets
-    subagents run on a completely different provider:model pair.
+    If ``delegation.base_url`` is configured (and no call-site provider
+    override), subagents use that direct OpenAI-compatible endpoint.
+    ``delegation.api_key`` overrides the key; when omitted, ``api_key`` is
+    returned as ``None`` so ``_build_child_agent`` inherits the parent agent's
+    key (``effective_api_key = override_api_key or parent_api_key``). This lets
+    providers that store their key outside ``OPENAI_API_KEY`` (e.g.
+    ``MINIMAX_API_KEY``, ``DASHSCOPE_API_KEY``) work without a duplicate config
+    entry.
 
-    If neither base_url nor provider is configured, returns None values so the
-    child inherits everything from the parent agent.
+    Otherwise, if a provider is configured (call-site or config), the full
+    credential bundle (base_url, api_key, api_mode, provider) is resolved via
+    the runtime provider system — the same path used by CLI/gateway startup.
+
+    If neither base_url nor provider is configured, returns None credential
+    fields so the child inherits them from the parent agent. A model-only
+    override still returns the model name so the child keeps parent credentials
+    on a different model within the same provider.
 
     Raises ValueError with a user-friendly message on credential failure.
     """
+    cfg = dict(cfg or {})
+    model_override = str(model_override or "").strip() or None
+    provider_override = str(provider_override or "").strip() or None
+    if model_override:
+        cfg["model"] = model_override
+    if provider_override:
+        cfg["provider"] = provider_override
+        # Call-site provider selection must resolve via the runtime provider
+        # system, not ride a global delegation.base_url pin meant for all
+        # children when no per-call provider was specified.
+        cfg.pop("base_url", None)
+        cfg.pop("api_key", None)
+        cfg.pop("api_mode", None)
+
     configured_model = str(cfg.get("model") or "").strip() or None
     configured_provider = str(cfg.get("provider") or "").strip() or None
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
@@ -3752,7 +3819,11 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- Optional 'model' / 'provider' select the child route per call "
+        "(also accepted per item in 'tasks'). Precedence: per-task > "
+        "top-level call args > delegation.model/provider in config.yaml > "
+        "parent model. Model-only keeps parent credentials; provider "
+        "resolves a full credential bundle via the runtime provider system.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3881,6 +3952,21 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override. Beats top-level "
+                                "'model' and delegation.model config."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override (e.g. openrouter, "
+                                "anthropic, custom:my-endpoint). Beats "
+                                "top-level 'provider' and delegation.provider."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -3893,6 +3979,24 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model for child agent(s). Optional. Per-task 'model' in "
+                    "tasks[] beats this. Beats delegation.model in config; "
+                    "when omitted, children inherit the parent model (or the "
+                    "config pin). Pair with 'provider' to switch backends."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Provider for child agent(s) (e.g. openrouter, anthropic, "
+                    "custom:my-endpoint). Optional. Per-task 'provider' beats "
+                    "this. Resolves credentials via the runtime provider "
+                    "system. Model-only keeps parent credentials."
+                ),
             },
             "background": {
                 "type": "boolean",
@@ -3966,6 +4070,8 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
+        model=args.get("model"),
+        provider=args.get("provider"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
