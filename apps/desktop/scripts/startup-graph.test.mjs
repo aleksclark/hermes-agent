@@ -16,7 +16,10 @@ let preloads = []
 beforeAll(() => {
   execFileSync(process.execPath, [viteBin, 'build', '--outDir', output, '--emptyOutDir'], {
     cwd: desktopRoot,
-    env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' },
+    // Vitest sets NODE_ENV=test. A production startup-budget gate must compile
+    // React's production build, matching `npm run build`, or it counts the much
+    // larger development runtime and reports a false regression.
+    env: { ...process.env, NODE_ENV: 'production', VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' },
     stdio: 'pipe'
   })
   html = fs.readFileSync(path.join(output, 'index.html'), 'utf8')
