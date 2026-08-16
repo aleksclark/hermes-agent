@@ -3765,6 +3765,7 @@ def delegate_task(
             override_acp_command=task_creds[i].get("command"),
             override_acp_args=task_creds[i].get("args"),
             role=effective_role,
+            route=(str(selected_aliases[i]).strip() if selected_aliases[i] else None),
         )
         # Attach the validated schema for the completion-side validation
         # hook in _run_single_child. Absent (None) on schema-less tasks.
@@ -3807,6 +3808,7 @@ def delegate_task(
                 owner_session_id=_origin_ui_session_id or None,
                 owner_transport=_origin_owner_transport,
                 owner_session_record=_origin_owner_session_record,
+                route=(str(selected_aliases[_i]).strip() if selected_aliases[_i] else None),
             )
             results.append(result)
         else:
@@ -3832,6 +3834,7 @@ def delegate_task(
                         owner_session_id=_origin_ui_session_id or None,
                         owner_transport=_origin_owner_transport,
                         owner_session_record=_origin_owner_session_record,
+                        route=(str(selected_aliases[i]).strip() if selected_aliases[i] else None),
                     )
                     futures[future] = i
 
