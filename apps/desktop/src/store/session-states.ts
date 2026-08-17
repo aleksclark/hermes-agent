@@ -415,6 +415,7 @@ export function dropSessionState(runtimeId: string) {
   clearSessionProviderWait(runtimeId)
   dropRuntimeStores(runtimeId)
   sessionScopeByRuntimeId.delete(runtimeId)
+  dropRuntimeStores(runtimeId)
 
   const current = $sessionStates.get()
   setSessionStalled(current[runtimeId]?.storedSessionId, false)
