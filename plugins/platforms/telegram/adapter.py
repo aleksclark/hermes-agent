@@ -303,6 +303,7 @@ from plugins.platforms.telegram.telegram_ids import (
     normalize_telegram_chat_id,
 )
 from plugins.platforms.telegram.telegram_network import (
+    SEED_FALLBACK_IPS,
     TelegramFallbackTransport,
     discover_fallback_ips,
     parse_fallback_ip_env,
@@ -415,8 +416,8 @@ def check_telegram_requirements() -> bool:
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
     global InlineKeyboardMarkup, LinkPreviewOptions, Application
-    global CommandHandler, CallbackQueryHandler, TypeHandler, TelegramMessageHandler
-    global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
+    global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
+    global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest, TypeHandler
     if TELEGRAM_AVAILABLE:
         return True
     try:
@@ -437,6 +438,7 @@ def check_telegram_requirements() -> bool:
             MessageHandler as _MH,
             TypeHandler as _TH,
             ContextTypes as _CT, filters as _filters,
+            TypeHandler as _TH,
         )
         from telegram.constants import ParseMode as _PM, ChatType as _CtT
         from telegram.request import HTTPXRequest as _HR
@@ -458,6 +460,7 @@ def check_telegram_requirements() -> bool:
     ParseMode = _PM
     ChatType = _CtT
     HTTPXRequest = _HR
+    TypeHandler = _TH
     TELEGRAM_AVAILABLE = True
     return True
 
@@ -4400,12 +4403,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 except Exception as exc:
                     logger.warning(
                         "[%s] Telegram fallback-IP discovery failed after %.0fs; "
-                        "continuing with the plain api.telegram.org path: %s",
+                        "using seed IPv4 Telegram API IPs so a blackholed IPv6 "
+                        "hostname path cannot hang initialize() (#87015): %s",
                         self.name,
                         discovery_timeout,
                         _redact_telegram_error_text(exc),
                     )
-                    fallback_ips = []
+                    fallback_ips = list(SEED_FALLBACK_IPS)
                 else:
                     logger.info(
                         "[%s] Auto-discovered Telegram fallback IPs: %s",

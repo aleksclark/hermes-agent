@@ -61,6 +61,7 @@ import type { ProfileInfo } from '@/types/hermes'
 import { PROFILES_ROUTE, SETTINGS_ROUTE } from '../../routes'
 
 import { useProfilePrewarm } from './use-profile-prewarm'
+import { useProfileRailRefreshOnActive } from './use-profile-rail-refresh-on-active'
 
 const CreateProfileDialog = lazy(() => import('../../profiles/create-profile-dialog').then(m => ({ default: m.CreateProfileDialog })))
 const DeleteProfileDialog = lazy(() => import('../../profiles/delete-profile-dialog').then(m => ({ default: m.DeleteProfileDialog })))
@@ -201,11 +202,13 @@ export function ProfileRail() {
     }
   }
 
-  // Re-pull the running profile + list on mount so a profile created elsewhere
-  // shows up; cheap and best-effort.
-  useEffect(() => {
-    void refreshActiveProfile()
-  }, [])
+  // Re-pull the running profile + list on mount, and again whenever the window
+  // regains focus/visibility -- a profile created, deleted, or renamed by
+  // another surface (Manage Profiles, another window, the CLI) leaves this
+  // rail's cached $profiles stale until something re-fetches it. See
+  // use-profile-rail-refresh-on-active.ts for the extracted (and tested)
+  // wiring.
+  useProfileRailRefreshOnActive()
 
   // Open the create dialog when the `profile.create` hotkey fires (the dialog
   // state lives here, so the global keybind bumps a request atom we watch).
